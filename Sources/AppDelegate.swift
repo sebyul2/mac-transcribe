@@ -332,12 +332,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let mods = NSEvent.modifierFlags
-        // The Apple Fn key needs Ctrl held (⌃Fn); a custom trigger key is a
-        // dedicated dictation key and fires on its own.
-        let baseSatisfied = fnHoldSource == .custom || mods.contains(.control)
+        // The Apple Fn key needs Ctrl held (⌃Fn); a custom trigger chord fires
+        // when all of its required modifiers are held with it.
+        let chord = settings.triggerKey
+        let baseSatisfied = fnHoldSource == .custom
+            ? FnKeyMonitor.modifiersSatisfied(chord)
+            : mods.contains(.control)
+        // The +Shift lock upgrade only applies when Shift is not already part
+        // of the chord itself (otherwise dictation would be unreachable).
+        let shiftUpgrades = fnHoldSource == .appleFn || !chord.modifiers.contains(.shift)
 
         // Trigger+Shift: toggle locked (long-form) recording.
-        if baseSatisfied && mods.contains(.shift) {
+        if baseSatisfied && shiftUpgrades && mods.contains(.shift) {
             fnHoldAction = .lockToggle
             stopFnHoldTimer()
             SpeechService.diag("trigger+shift -> toggle locked (locked=\(isLockedRecording))")

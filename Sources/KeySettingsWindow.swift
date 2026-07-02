@@ -88,7 +88,8 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
         hintLabel.stringValue = """
         Dictation key: hold to dictate; add Shift to start/stop a long-form \
         recording. Long-form key: optional dedicated key — one press toggles \
-        the long-form recording by itself. The Apple keyboard's ⌃Fn / ⌃⇧Fn \
+        the long-form recording by itself. To register a combination, hold \
+        the modifiers and press the key (e.g. ⌘⇧R). The Apple keyboard's ⌃Fn / ⌃⇧Fn \
         always works too. Defaults: hold Left Ctrl to dictate, Left Ctrl+Shift for long-form.
         """
         content.addSubview(hintLabel)
@@ -98,17 +99,16 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private func refresh() {
         let s = Settings.shared
-        let short = s.triggerKey
-        shortKeyLabel.stringValue = FnKeyMonitor.keyName(page: short.page, usage: short.usage)
+        shortKeyLabel.stringValue = FnKeyMonitor.chordName(s.triggerKey)
         if let long = s.longTriggerKey {
-            longKeyLabel.stringValue = FnKeyMonitor.keyName(page: long.page, usage: long.usage)
+            longKeyLabel.stringValue = FnKeyMonitor.chordName(long)
             longClearButton.isEnabled = capturing == .none
         } else {
             longKeyLabel.stringValue = "Trigger + Shift"
             longClearButton.isEnabled = false
         }
-        shortChangeButton.title = capturing == .short ? "Press any key…" : "Change…"
-        longChangeButton.title = capturing == .long ? "Press any key…" : "Change…"
+        shortChangeButton.title = capturing == .short ? "Press key/combo…" : "Change…"
+        longChangeButton.title = capturing == .long ? "Press key/combo…" : "Change…"
         shortChangeButton.isEnabled = capturing == .none
         longChangeButton.isEnabled = capturing == .none
         resetButton.isEnabled = capturing == .none
@@ -118,15 +118,15 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
         guard let fnMonitor, capturing == .none else { return }
         capturing = target
         refresh()
-        fnMonitor.captureNextKey = { [weak self] page, usage in
+        fnMonitor.captureNextKey = { [weak self] chord in
             guard let self else { return }
             let target = self.capturing
             self.capturing = .none
             switch target {
             case .short:
-                Settings.shared.triggerKey = (page, usage)
+                Settings.shared.triggerKey = chord
             case .long:
-                Settings.shared.longTriggerKey = (page, usage)
+                Settings.shared.longTriggerKey = chord
             case .none:
                 break
             }
@@ -145,7 +145,7 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func resetTapped() {
-        Settings.shared.triggerKey = (0x07, 0xE0)
+        Settings.shared.triggerKey = KeyChord(page: 0x07, usage: 0xE0, modifiersRaw: 0)
         Settings.shared.longTriggerKey = nil
         onTriggerChanged?()
         refresh()

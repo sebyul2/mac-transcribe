@@ -2,6 +2,16 @@ import Cocoa
 import Foundation
 import IOKit.hid
 
+/// A trigger binding: a physical key plus the modifier keys that must be held
+/// with it (e.g. ⌘⇧R). For a bare key the modifier set is empty. When the key
+/// itself is a modifier, its own flag is not part of the required set.
+struct KeyChord: Equatable {
+    var page: UInt32
+    var usage: UInt32
+    var modifiersRaw: UInt
+    var modifiers: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiersRaw) }
+}
+
 /// Globally monitors the Fn (Function/Globe) modifier key.
 ///
 /// The Fn/Globe key is not delivered reliably through a CGEvent tap on modern
@@ -23,19 +33,56 @@ final class FnKeyMonitor {
     /// Fn as a modifier (Fn+arrows, Fn+F-keys, Fn+Backspace…), not dictating.
     var onComboKeyWhileFnHeld: (() -> Void)?
     /// When set, the next key press is delivered here (for the trigger-key
-    /// settings capture) instead of being processed, then cleared.
-    var captureNextKey: ((_ page: UInt32, _ usage: UInt32) -> Void)?
+    /// settings capture) instead of being processed, then cleared. Modifiers
+    /// held at capture time become part of the chord.
+    var captureNextKey: ((KeyChord) -> Void)?
 
-    /// User-configurable trigger key for external keyboards (defaults to
-    /// Right Ctrl). The Apple Fn key always works in addition.
-    var customTrigger: (page: UInt32, usage: UInt32) = (UInt32(kHIDPage_KeyboardOrKeypad), 0xE4)
+    /// User-configurable trigger chord for dictation (defaults to bare
+    /// Left Ctrl). The Apple Fn key always works in addition.
+    var customTrigger = KeyChord(page: UInt32(kHIDPage_KeyboardOrKeypad), usage: 0xE0, modifiersRaw: 0)
 
-    /// Optional dedicated key for the locked (long-form) recording toggle.
+    /// Optional dedicated chord for the locked (long-form) recording toggle.
     /// When unset, long-form is started with trigger+Shift only.
-    var longTrigger: (page: UInt32, usage: UInt32)?
+    var longTrigger: KeyChord?
     /// Fired on the dedicated long-form key's key-down (it's a toggle).
     var onLongTriggerDown: (() -> Void)?
     private var longDown = false
+
+    /// Modifier flags we track for chords.
+    static let relevantModifiers: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
+
+    /// The modifier flag a modifier key itself contributes, so a chord bound
+    /// to e.g. Left Ctrl doesn't require Ctrl as an *additional* modifier.
+    static func ownFlag(for usage: UInt32) -> NSEvent.ModifierFlags {
+        switch usage {
+        case 0xE0, 0xE4: return .control
+        case 0xE1, 0xE5: return .shift
+        case 0xE2, 0xE6: return .option
+        case 0xE3, 0xE7: return .command
+        default: return []
+        }
+    }
+
+    /// Modifiers currently held, minus the trigger key's own contribution.
+    static func heldModifiers(excluding usage: UInt32) -> NSEvent.ModifierFlags {
+        NSEvent.modifierFlags.intersection(relevantModifiers).subtracting(ownFlag(for: usage))
+    }
+
+    /// True when every modifier the chord requires is currently held.
+    static func modifiersSatisfied(_ chord: KeyChord) -> Bool {
+        heldModifiers(excluding: chord.usage).isSuperset(of: chord.modifiers)
+    }
+
+    /// Display name for a chord, for the settings UI (e.g. "⌘⇧ + F13").
+    static func chordName(_ chord: KeyChord) -> String {
+        var prefix = ""
+        if chord.modifiers.contains(.control) { prefix += "⌃" }
+        if chord.modifiers.contains(.option) { prefix += "⌥" }
+        if chord.modifiers.contains(.shift) { prefix += "⇧" }
+        if chord.modifiers.contains(.command) { prefix += "⌘" }
+        let base = keyName(page: chord.page, usage: chord.usage)
+        return prefix.isEmpty ? base : "\(prefix) + \(base)"
+    }
 
     /// Display name for a trigger key, for the settings UI.
     static func keyName(page: UInt32, usage: UInt32) -> String {
@@ -170,12 +217,14 @@ final class FnKeyMonitor {
         SpeechService.diag("flagsChanged keyCode=\(keyCode) flags=0x\(String(event.modifierFlags.rawValue, radix: 16)) trigger=(\(customTrigger.page),\(customTrigger.usage))")
 
         // Modifier capture for the settings window (HID capture misses
-        // Karabiner-processed modifiers entirely).
+        // Karabiner-processed modifiers entirely). Other held modifiers become
+        // part of the chord.
         if let capture = captureNextKey,
            let usage = Self.modifierUsageToKeyCode.first(where: { $0.value == keyCode })?.key,
            Self.modifierFlagActive(for: usage, flags: event.modifierFlags) {
             captureNextKey = nil
-            capture(UInt32(kHIDPage_KeyboardOrKeypad), usage)
+            let mods = Self.heldModifiers(excluding: usage)
+            capture(KeyChord(page: UInt32(kHIDPage_KeyboardOrKeypad), usage: usage, modifiersRaw: mods.rawValue))
             return
         }
 
@@ -192,7 +241,7 @@ final class FnKeyMonitor {
             let pressed = Self.modifierFlagActive(for: lt.usage, flags: event.modifierFlags)
             if pressed != longDown {
                 longDown = pressed
-                if pressed {
+                if pressed, Self.modifiersSatisfied(lt) {
                     NSLog("MacWhisper[Fn]: LongTrigger DOWN (flags)")
                     DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
                 }
@@ -214,13 +263,18 @@ final class FnKeyMonitor {
         }
 
         // Trigger-key capture for the settings window: deliver the next real
-        // key press (any keyboard key or the Apple Fn) and swallow it.
+        // key press (any keyboard key or the Apple Fn) and swallow it. The
+        // modifiers held at that moment become part of the chord, so pressing
+        // e.g. ⌘⇧R registers the full combination.
         if let capture = captureNextKey, pressed {
             let isFn = page == fnUsagePage && usage == fnUsage
             let isKeyboardKey = page == UInt32(kHIDPage_KeyboardOrKeypad) && usage >= 4
             if isFn || isKeyboardKey {
                 captureNextKey = nil
-                DispatchQueue.main.async { capture(page, usage) }
+                DispatchQueue.main.async {
+                    let mods = Self.heldModifiers(excluding: usage)
+                    capture(KeyChord(page: page, usage: usage, modifiersRaw: mods.rawValue))
+                }
                 return
             }
         }
@@ -231,13 +285,13 @@ final class FnKeyMonitor {
             return
         }
 
-        // Dedicated long-form toggle key, when configured. Checked before the
-        // dictation trigger so binding the same key prefers the long-form
-        // action.
+        // Dedicated long-form toggle chord, when configured. Checked before
+        // the dictation trigger so binding the same key prefers the long-form
+        // action. Fires only when the chord's modifiers are held too.
         if let lt = longTrigger, page == lt.page, usage == lt.usage {
             guard pressed != longDown else { return }
             longDown = pressed
-            if pressed {
+            if pressed, Self.modifiersSatisfied(lt) {
                 NSLog("MacWhisper[Fn]: LongTrigger DOWN")
                 DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
             }
