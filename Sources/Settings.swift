@@ -49,6 +49,8 @@ final class Settings {
         static let subtitleOverlay = "subtitleOverlayEnabled"
         static let triggerKeyPage = "triggerKeyPage"
         static let triggerKeyUsage = "triggerKeyUsage"
+        static let longTriggerKeyPage = "longTriggerKeyPage"
+        static let longTriggerKeyUsage = "longTriggerKeyUsage"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -187,6 +189,21 @@ final class Settings {
         set {
             defaults.set(Int(newValue.page), forKey: Keys.triggerKeyPage)
             defaults.set(Int(newValue.usage), forKey: Keys.triggerKeyUsage)
+        }
+    }
+
+    /// Optional dedicated key toggling the locked (long-form) recording.
+    /// nil = not set; trigger+Shift is then the only long-form gesture.
+    var longTriggerKey: (page: UInt32, usage: UInt32)? {
+        get {
+            let page = defaults.integer(forKey: Keys.longTriggerKeyPage)
+            let usage = defaults.integer(forKey: Keys.longTriggerKeyUsage)
+            guard page > 0, usage > 0 else { return nil }
+            return (UInt32(page), UInt32(usage))
+        }
+        set {
+            defaults.set(Int(newValue?.page ?? 0), forKey: Keys.longTriggerKeyPage)
+            defaults.set(Int(newValue?.usage ?? 0), forKey: Keys.longTriggerKeyUsage)
         }
     }
 

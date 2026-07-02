@@ -1,30 +1,35 @@
 import Cocoa
 
-/// Small window for choosing the dictation trigger key on external keyboards.
-/// The Apple Fn key (⌃Fn hold / ⌃⇧Fn lock) always works; this key is the
-/// stand-in for keyboards without an Apple Fn: hold it to dictate, hold it
-/// with Shift to toggle a locked (long-form) recording.
+/// Window for choosing the dictation trigger keys. The Apple Fn key
+/// (⌃Fn hold / ⌃⇧Fn lock) always works; these bindings are for external
+/// keyboards or personal preference:
+/// - Dictation key: hold to dictate, add Shift to toggle long-form
+/// - Long-form key (optional): a dedicated key that toggles long-form alone
 final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
-    private let currentKeyLabel = NSTextField(labelWithString: "")
-    private let changeButton = NSButton()
+    private let shortKeyLabel = NSTextField(labelWithString: "")
+    private let shortChangeButton = NSButton()
+    private let longKeyLabel = NSTextField(labelWithString: "")
+    private let longChangeButton = NSButton()
+    private let longClearButton = NSButton()
     private let resetButton = NSButton()
     private let hintLabel = NSTextField(wrappingLabelWithString: "")
 
     /// The monitor whose capture mode we borrow while recording a new key.
     var fnMonitor: FnKeyMonitor?
-    /// Called after the trigger key changed so the app can re-apply it.
+    /// Called after a binding changed so the app can re-apply it.
     var onTriggerChanged: (() -> Void)?
 
-    private var capturing = false
+    private enum CaptureTarget { case none, short, long }
+    private var capturing: CaptureTarget = .none
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 190),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 236),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Trigger Key"
+        window.title = "Trigger Keys"
         window.isReleasedWhenClosed = false
         self.init(window: window)
         window.delegate = self
@@ -34,37 +39,58 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        let title = NSTextField(labelWithString: "External-keyboard trigger key:")
-        title.frame = NSRect(x: 20, y: 146, width: 240, height: 22)
-        content.addSubview(title)
+        func rowLabel(_ text: String, y: CGFloat) {
+            let l = NSTextField(labelWithString: text)
+            l.frame = NSRect(x: 20, y: y, width: 120, height: 22)
+            content.addSubview(l)
+        }
 
-        currentKeyLabel.frame = NSRect(x: 260, y: 146, width: 140, height: 22)
-        currentKeyLabel.font = .boldSystemFont(ofSize: 13)
-        content.addSubview(currentKeyLabel)
+        // Short (push-to-talk) trigger.
+        rowLabel("Dictation key:", y: 192)
+        shortKeyLabel.frame = NSRect(x: 145, y: 192, width: 130, height: 22)
+        shortKeyLabel.font = .boldSystemFont(ofSize: 13)
+        content.addSubview(shortKeyLabel)
+        shortChangeButton.title = "Change…"
+        shortChangeButton.bezelStyle = .rounded
+        shortChangeButton.frame = NSRect(x: 280, y: 188, width: 140, height: 30)
+        shortChangeButton.target = self
+        shortChangeButton.action = #selector(changeShortTapped)
+        content.addSubview(shortChangeButton)
 
-        changeButton.title = "Change…"
-        changeButton.bezelStyle = .rounded
-        changeButton.frame = NSRect(x: 20, y: 104, width: 110, height: 30)
-        changeButton.target = self
-        changeButton.action = #selector(changeTapped)
-        content.addSubview(changeButton)
+        // Long-form toggle trigger (optional).
+        rowLabel("Long-form key:", y: 152)
+        longKeyLabel.frame = NSRect(x: 145, y: 152, width: 130, height: 22)
+        longKeyLabel.font = .boldSystemFont(ofSize: 13)
+        content.addSubview(longKeyLabel)
+        longChangeButton.title = "Change…"
+        longChangeButton.bezelStyle = .rounded
+        longChangeButton.frame = NSRect(x: 280, y: 148, width: 140, height: 30)
+        longChangeButton.target = self
+        longChangeButton.action = #selector(changeLongTapped)
+        content.addSubview(longChangeButton)
+        longClearButton.title = "Clear"
+        longClearButton.bezelStyle = .rounded
+        longClearButton.frame = NSRect(x: 280, y: 116, width: 140, height: 30)
+        longClearButton.target = self
+        longClearButton.action = #selector(clearLongTapped)
+        content.addSubview(longClearButton)
 
-        resetButton.title = "Reset to Right Ctrl"
+        resetButton.title = "Reset to Defaults"
         resetButton.bezelStyle = .rounded
-        resetButton.frame = NSRect(x: 140, y: 104, width: 160, height: 30)
+        resetButton.frame = NSRect(x: 20, y: 116, width: 150, height: 30)
         resetButton.target = self
         resetButton.action = #selector(resetTapped)
         content.addSubview(resetButton)
 
-        hintLabel.frame = NSRect(x: 20, y: 16, width: 380, height: 80)
+        hintLabel.frame = NSRect(x: 20, y: 12, width: 400, height: 96)
         hintLabel.font = .systemFont(ofSize: 11)
         hintLabel.textColor = .secondaryLabelColor
         hintLabel.stringValue = """
-        Hold the trigger key to dictate; add Shift to start/stop a long-form \
-        recording. The Apple keyboard's ⌃Fn / ⌃⇧Fn always works as well.
-        Pick a key you don't use for anything else — Right Ctrl, Right Option \
-        or F13–F19 work well. Pressing another key while the trigger is held \
-        cancels the dictation, so normal shortcuts stay usable.
+        Dictation key: hold to dictate; add Shift to start/stop a long-form \
+        recording. Long-form key: optional dedicated key — one press toggles \
+        the long-form recording by itself. The Apple keyboard's ⌃Fn / ⌃⇧Fn \
+        always works too. Pick keys you don't use elsewhere (Right Ctrl, \
+        Right Option, F13–F19 work well).
         """
         content.addSubview(hintLabel)
 
@@ -72,28 +98,56 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func refresh() {
-        let key = Settings.shared.triggerKey
-        currentKeyLabel.stringValue = FnKeyMonitor.keyName(page: key.page, usage: key.usage)
-        changeButton.title = capturing ? "Press any key…" : "Change…"
-        changeButton.isEnabled = !capturing
-        resetButton.isEnabled = !capturing
+        let s = Settings.shared
+        let short = s.triggerKey
+        shortKeyLabel.stringValue = FnKeyMonitor.keyName(page: short.page, usage: short.usage)
+        if let long = s.longTriggerKey {
+            longKeyLabel.stringValue = FnKeyMonitor.keyName(page: long.page, usage: long.usage)
+            longClearButton.isEnabled = capturing == .none
+        } else {
+            longKeyLabel.stringValue = "Trigger + Shift"
+            longClearButton.isEnabled = false
+        }
+        shortChangeButton.title = capturing == .short ? "Press any key…" : "Change…"
+        longChangeButton.title = capturing == .long ? "Press any key…" : "Change…"
+        shortChangeButton.isEnabled = capturing == .none
+        longChangeButton.isEnabled = capturing == .none
+        resetButton.isEnabled = capturing == .none
     }
 
-    @objc private func changeTapped() {
-        guard let fnMonitor else { return }
-        capturing = true
+    private func beginCapture(_ target: CaptureTarget) {
+        guard let fnMonitor, capturing == .none else { return }
+        capturing = target
         refresh()
         fnMonitor.captureNextKey = { [weak self] page, usage in
             guard let self else { return }
-            self.capturing = false
-            Settings.shared.triggerKey = (page, usage)
+            let target = self.capturing
+            self.capturing = .none
+            switch target {
+            case .short:
+                Settings.shared.triggerKey = (page, usage)
+            case .long:
+                Settings.shared.longTriggerKey = (page, usage)
+            case .none:
+                break
+            }
             self.onTriggerChanged?()
             self.refresh()
         }
     }
 
+    @objc private func changeShortTapped() { beginCapture(.short) }
+    @objc private func changeLongTapped() { beginCapture(.long) }
+
+    @objc private func clearLongTapped() {
+        Settings.shared.longTriggerKey = nil
+        onTriggerChanged?()
+        refresh()
+    }
+
     @objc private func resetTapped() {
         Settings.shared.triggerKey = (0x07, 0xE4)
+        Settings.shared.longTriggerKey = nil
         onTriggerChanged?()
         refresh()
     }
@@ -101,7 +155,7 @@ final class KeySettingsWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         // Abandon a pending capture so a later key press doesn't rebind.
         fnMonitor?.captureNextKey = nil
-        capturing = false
+        capturing = .none
     }
 
     func showWindow() {

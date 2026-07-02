@@ -231,14 +231,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func requestPermissionsAndStart() {
         fnMonitor.customTrigger = settings.triggerKey
+        fnMonitor.longTrigger = settings.longTriggerKey
         _ = fnMonitor.start()
         fnMonitor.onFnDown = { [weak self] at, source in self?.handleFnDown(at: at, source: source) }
         fnMonitor.onFnUp = { [weak self] at in self?.handleFnUp(at: at) }
         fnMonitor.onComboKeyWhileFnHeld = { [weak self] in self?.handleFnCombo() }
+        fnMonitor.onLongTriggerDown = { [weak self] in
+            SpeechService.diag("long trigger key -> toggle locked")
+            self?.toggleLockHotkey()
+        }
         keySettingsController.fnMonitor = fnMonitor
         keySettingsController.onTriggerChanged = { [weak self] in
             guard let self else { return }
             self.fnMonitor.customTrigger = self.settings.triggerKey
+            self.fnMonitor.longTrigger = self.settings.longTriggerKey
         }
 
         // Live-restart the Fn monitor the moment Input Monitoring is granted
@@ -299,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var fnHoldSource: FnKeyMonitor.TriggerSource = .appleFn
 
     private func handleFnDown(at now: Date, source: FnKeyMonitor.TriggerSource) {
+        SpeechService.diag("trigger down source=\(source) locked=\(isLockedRecording)")
         fnHoldAction = .undecided
         fnHoldSource = source
         ctrlOnlySince = nil
@@ -445,6 +452,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settings.subtitleOverlayEnabled {
             subtitles.show()
         }
+        // Immediate start feedback: without it users assume the toggle didn't
+        // register and press again, which stops the recording they just began.
+        NSSound(named: "Pop")?.play()
+        subtitles.flashStatus("● 녹음 시작")
         longForm.start(language: settings.language)
         rebuildMenu()
     }
@@ -454,6 +465,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockStopping = true
         NSLog("MacWhisper[App]: locked recording stopping")
         SystemAudio.restoreOutput()
+        NSSound(named: "Bottle")?.play()
+        subtitles.flashStatus("■ 녹음 종료 — 저장 중…")
         transcriptWindow.setStatus("Finishing…")
         longForm.stop()
     }

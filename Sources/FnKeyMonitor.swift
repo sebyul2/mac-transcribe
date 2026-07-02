@@ -1,3 +1,4 @@
+import Cocoa
 import Foundation
 import IOKit.hid
 
@@ -29,6 +30,13 @@ final class FnKeyMonitor {
     /// Right Ctrl). The Apple Fn key always works in addition.
     var customTrigger: (page: UInt32, usage: UInt32) = (UInt32(kHIDPage_KeyboardOrKeypad), 0xE4)
 
+    /// Optional dedicated key for the locked (long-form) recording toggle.
+    /// When unset, long-form is started with trigger+Shift only.
+    var longTrigger: (page: UInt32, usage: UInt32)?
+    /// Fired on the dedicated long-form key's key-down (it's a toggle).
+    var onLongTriggerDown: (() -> Void)?
+    private var longDown = false
+
     /// Display name for a trigger key, for the settings UI.
     static func keyName(page: UInt32, usage: UInt32) -> String {
         if page == 0xFF, usage == 0x03 { return "Fn (Apple)" }
@@ -44,6 +52,29 @@ final class FnKeyMonitor {
     private var manager: IOHIDManager?
     private var fnDown = false
     private var customDown = false
+    /// NSEvent monitors for modifier-key triggers. Karabiner-Elements seizes
+    /// physical keyboards and re-injects events through its virtual keyboard,
+    /// but modifiers are not re-injected as HID elements — they only surface
+    /// as flagsChanged events. Without these monitors a modifier trigger key
+    /// is dead on any Karabiner-processed keyboard.
+    private var flagsMonitorGlobal: Any?
+    private var flagsMonitorLocal: Any?
+
+    /// HID usage → virtual key code for the eight standard modifiers.
+    private static let modifierUsageToKeyCode: [UInt32: UInt16] = [
+        0xE0: 59, 0xE1: 56, 0xE2: 58, 0xE3: 55,   // left ctrl/shift/opt/cmd
+        0xE4: 62, 0xE5: 60, 0xE6: 61, 0xE7: 54,   // right ctrl/shift/opt/cmd
+    ]
+
+    private static func modifierFlagActive(for usage: UInt32, flags: NSEvent.ModifierFlags) -> Bool {
+        switch usage {
+        case 0xE0, 0xE4: return flags.contains(.control)
+        case 0xE1, 0xE5: return flags.contains(.shift)
+        case 0xE2, 0xE6: return flags.contains(.option)
+        case 0xE3, 0xE7: return flags.contains(.command)
+        default: return false
+        }
+    }
     /// Either trigger key held: Apple Fn/Globe, or the custom trigger key
     /// (Right Ctrl by default) on external keyboards without an Apple Fn.
     private var triggerDown: Bool { fnDown || customDown }
@@ -68,15 +99,27 @@ final class FnKeyMonitor {
 
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
 
-        // Match the keyboard (where the Fn element lives) and, defensively, any
-        // device that primarily exposes the AppleVendor top-case page.
+        // Match keyboards (where the Fn element lives) and, defensively, keypads
+        // and any device that primarily exposes the AppleVendor top-case page —
+        // some external keyboards enumerate as keypads or composite devices.
         let matches: [[String: Any]] = [
             [kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
              kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Keyboard],
+            [kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+             kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Keypad],
             [kIOHIDDeviceUsagePageKey as String: Int(fnUsagePage),
              kIOHIDDeviceUsageKey as String: Int(fnUsage)],
         ]
         IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
+
+        // Log every matched keyboard so "my external keyboard does nothing"
+        // reports can be diagnosed from the diag file.
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { _, _, _, device in
+            let name = (IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String) ?? "unknown"
+            let vendor = (IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int) ?? 0
+            let transport = (IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String) ?? "?"
+            SpeechService.diag("hid keyboard matched: \(name) vendor=\(vendor) transport=\(transport)")
+        }, nil)
 
         let context = Unmanaged.passUnretained(self).toOpaque()
         IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, value in
@@ -89,6 +132,19 @@ final class FnKeyMonitor {
         let opened = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
         self.manager = manager
 
+        // Modifier-key triggers need the NSEvent path: Karabiner's virtual
+        // keyboard does not re-inject modifiers as HID elements, so a Ctrl/Opt
+        // trigger would otherwise be dead on Karabiner-processed keyboards.
+        if flagsMonitorGlobal == nil {
+            flagsMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                self?.handleFlagsChanged(event)
+            }
+            flagsMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                self?.handleFlagsChanged(event)
+                return event
+            }
+        }
+
         NSLog("MacWhisper[Fn]: start opened=\(opened) inputMonitoring=\(hasInputMonitoringAccess)")
         return opened && hasInputMonitoringAccess
     }
@@ -99,6 +155,48 @@ final class FnKeyMonitor {
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         }
         manager = nil
+        if let monitor = flagsMonitorGlobal { NSEvent.removeMonitor(monitor) }
+        if let monitor = flagsMonitorLocal { NSEvent.removeMonitor(monitor) }
+        flagsMonitorGlobal = nil
+        flagsMonitorLocal = nil
+    }
+
+    /// flagsChanged path for modifier trigger keys (runs on the main thread).
+    /// The HID path stays authoritative for non-modifier keys and the Apple Fn;
+    /// the shared down-state guards make duplicate delivery harmless when a
+    /// non-Karabiner keyboard reports through both paths.
+    private func handleFlagsChanged(_ event: NSEvent) {
+        let keyCode = event.keyCode
+
+        // Modifier capture for the settings window (HID capture misses
+        // Karabiner-processed modifiers entirely).
+        if let capture = captureNextKey,
+           let usage = Self.modifierUsageToKeyCode.first(where: { $0.value == keyCode })?.key,
+           Self.modifierFlagActive(for: usage, flags: event.modifierFlags) {
+            captureNextKey = nil
+            capture(UInt32(kHIDPage_KeyboardOrKeypad), usage)
+            return
+        }
+
+        if customTrigger.page == UInt32(kHIDPage_KeyboardOrKeypad),
+           let code = Self.modifierUsageToKeyCode[customTrigger.usage], code == keyCode {
+            let pressed = Self.modifierFlagActive(for: customTrigger.usage, flags: event.modifierFlags)
+            if pressed != customDown {
+                updateTrigger(&customDown, pressed: pressed, source: .custom, label: "Trigger(flags)")
+            }
+        }
+
+        if let lt = longTrigger, lt.page == UInt32(kHIDPage_KeyboardOrKeypad),
+           let code = Self.modifierUsageToKeyCode[lt.usage], code == keyCode {
+            let pressed = Self.modifierFlagActive(for: lt.usage, flags: event.modifierFlags)
+            if pressed != longDown {
+                longDown = pressed
+                if pressed {
+                    NSLog("MacWhisper[Fn]: LongTrigger DOWN (flags)")
+                    DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
+                }
+            }
+        }
     }
 
     private func handle(value: IOHIDValue) {
@@ -123,6 +221,19 @@ final class FnKeyMonitor {
         if page == fnUsagePage, usage == fnUsage {
             guard pressed != fnDown else { return }
             updateTrigger(&fnDown, pressed: pressed, source: .appleFn, label: "Fn")
+            return
+        }
+
+        // Dedicated long-form toggle key, when configured. Checked before the
+        // dictation trigger so binding the same key prefers the long-form
+        // action.
+        if let lt = longTrigger, page == lt.page, usage == lt.usage {
+            guard pressed != longDown else { return }
+            longDown = pressed
+            if pressed {
+                NSLog("MacWhisper[Fn]: LongTrigger DOWN")
+                DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
+            }
             return
         }
 

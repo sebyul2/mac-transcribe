@@ -34,6 +34,8 @@ final class SubtitleOverlay {
     /// Armed by show(); the panel becomes visible only once real speech text
     /// arrives, so a silent stretch never shows an empty black box.
     private var armed = false
+    /// Generation token for flashStatus auto-hide.
+    private var flashGen = 0
 
     init() {
         let rect = NSRect(x: 0, y: 0, width: 400, height: 44)
@@ -111,6 +113,35 @@ final class SubtitleOverlay {
         }, completionHandler: { [weak self] in
             self?.panel.orderOut(nil)
         })
+    }
+
+    /// Briefly shows a status line (e.g. "● Recording") in the caption spot so
+    /// starting/stopping has immediate visual feedback, then hides again after
+    /// `duration` unless real speech text has replaced it.
+    func flashStatus(_ text: String, duration: TimeInterval = 2.0) {
+        flashGen &+= 1
+        let myGen = flashGen
+        textField.stringValue = text
+        layout(for: text)
+        if !panel.isVisible {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.flashGen == myGen else { return }
+            // No speech arrived meanwhile — fade the badge back out.
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.25
+                self.panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.flashGen == myGen else { return }
+                self.panel.orderOut(nil)
+            })
+        }
     }
 
     /// Feeds the full accumulated transcript; the overlay shows only the tail,
