@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let transcriptWindow = TranscriptWindowController()
     private let subtitles = SubtitleOverlay()
     private let settingsController = SettingsWindowController()
+    private let keySettingsController = KeySettingsWindowController()
     private let permissionsController = PermissionsWindowController()
 
     private var isRecording = false
@@ -172,6 +173,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
         }
 
+        let keyItem = NSMenuItem(title: "Trigger Key…", action: #selector(openKeySettings), keyEquivalent: "")
+        keyItem.target = self
+        keyItem.image = menuIcon("keyboard")
+        menu.addItem(keyItem)
+
         let permItem = NSMenuItem(title: "Permissions…", action: #selector(openPermissions), keyEquivalent: "")
         permItem.target = self
         menu.addItem(permItem)
@@ -224,10 +230,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Permissions + monitor
 
     private func requestPermissionsAndStart() {
+        fnMonitor.customTrigger = settings.triggerKey
         _ = fnMonitor.start()
-        fnMonitor.onFnDown = { [weak self] at in self?.handleFnDown(at: at) }
+        fnMonitor.onFnDown = { [weak self] at, source in self?.handleFnDown(at: at, source: source) }
         fnMonitor.onFnUp = { [weak self] at in self?.handleFnUp(at: at) }
         fnMonitor.onComboKeyWhileFnHeld = { [weak self] in self?.handleFnCombo() }
+        keySettingsController.fnMonitor = fnMonitor
+        keySettingsController.onTriggerChanged = { [weak self] in
+            guard let self else { return }
+            self.fnMonitor.customTrigger = self.settings.triggerKey
+        }
 
         // Live-restart the Fn monitor the moment Input Monitoring is granted
         // while the permissions window is open, so the Fn key starts working
@@ -282,8 +294,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is just the system Globe key and we stand down.
     private static let modifierArrivalWindow: TimeInterval = 1.0
 
-    private func handleFnDown(at now: Date) {
+    /// Which trigger key started the current hold. The Apple Fn requires Ctrl
+    /// (⌃Fn); a custom trigger key (Right Ctrl by default) fires on its own.
+    private var fnHoldSource: FnKeyMonitor.TriggerSource = .appleFn
+
+    private func handleFnDown(at now: Date, source: FnKeyMonitor.TriggerSource) {
         fnHoldAction = .undecided
+        fnHoldSource = source
         ctrlOnlySince = nil
         fnHoldStartedAt = now
         // Evaluate immediately (modifiers already down), then keep polling
@@ -308,20 +325,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let mods = NSEvent.modifierFlags
+        // The Apple Fn key needs Ctrl held (⌃Fn); a custom trigger key is a
+        // dedicated dictation key and fires on its own.
+        let baseSatisfied = fnHoldSource == .custom || mods.contains(.control)
 
-        // ⌃⇧Fn: toggle locked (long-form) recording.
-        if mods.contains(.control) && mods.contains(.shift) {
+        // Trigger+Shift: toggle locked (long-form) recording.
+        if baseSatisfied && mods.contains(.shift) {
             fnHoldAction = .lockToggle
             stopFnHoldTimer()
-            SpeechService.diag("ctrl+shift+fn -> toggle locked (locked=\(isLockedRecording))")
+            SpeechService.diag("trigger+shift -> toggle locked (locked=\(isLockedRecording))")
             toggleLockHotkey()
             return
         }
 
-        // ⌃Fn: push-to-talk — held through the Shift-detection delay first so
-        // a Shift landing a beat later upgrades to the lock toggle instead of
-        // misfiring a dictation session.
-        if mods.contains(.control) {
+        // Trigger alone: push-to-talk — held through the Shift-detection delay
+        // first so a Shift landing a beat later upgrades to the lock toggle
+        // instead of misfiring a dictation session.
+        if baseSatisfied {
             if ctrlOnlySince == nil { ctrlOnlySince = Date() }
             if Date().timeIntervalSince(ctrlOnlySince!) >= Self.shiftDetectionDelay {
                 stopFnHoldTimer()
@@ -727,6 +747,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         settingsController.showWindow()
+    }
+
+    @objc private func openKeySettings() {
+        keySettingsController.showWindow()
     }
 
     @objc private func openPermissions() {

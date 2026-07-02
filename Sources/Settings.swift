@@ -47,6 +47,8 @@ final class Settings {
         static let silenceAutoStop = "silenceAutoStopEnabled"
         static let glossaryPath = "glossaryPath"
         static let subtitleOverlay = "subtitleOverlayEnabled"
+        static let triggerKeyPage = "triggerKeyPage"
+        static let triggerKeyUsage = "triggerKeyUsage"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -170,6 +172,22 @@ final class Settings {
     var subtitleOverlayEnabled: Bool {
         get { defaults.bool(forKey: Keys.subtitleOverlay) }
         set { defaults.set(newValue, forKey: Keys.subtitleOverlay) }
+    }
+
+    /// Custom trigger key (HID page/usage) for external keyboards. Defaults to
+    /// Right Ctrl on the standard keyboard page. The Apple Fn key (⌃Fn) always
+    /// works in addition.
+    var triggerKey: (page: UInt32, usage: UInt32) {
+        get {
+            let page = defaults.integer(forKey: Keys.triggerKeyPage)
+            let usage = defaults.integer(forKey: Keys.triggerKeyUsage)
+            guard page > 0, usage > 0 else { return (0x07, 0xE4) }
+            return (UInt32(page), UInt32(usage))
+        }
+        set {
+            defaults.set(Int(newValue.page), forKey: Keys.triggerKeyPage)
+            defaults.set(Int(newValue.usage), forKey: Keys.triggerKeyUsage)
+        }
     }
 
     // MARK: - Glossary
