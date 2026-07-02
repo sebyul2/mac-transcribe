@@ -49,8 +49,10 @@ final class Settings {
         static let subtitleOverlay = "subtitleOverlayEnabled"
         static let triggerKeyPage = "triggerKeyPage"
         static let triggerKeyUsage = "triggerKeyUsage"
+        static let triggerKeyMods = "triggerKeyModifiers"
         static let longTriggerKeyPage = "longTriggerKeyPage"
         static let longTriggerKeyUsage = "longTriggerKeyUsage"
+        static let longTriggerKeyMods = "longTriggerKeyModifiers"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -179,31 +181,35 @@ final class Settings {
     /// Custom trigger key (HID page/usage) for external keyboards. Defaults to
     /// Left Ctrl on the standard keyboard page: hold it to dictate, add Shift
     /// for the long-form toggle. The Apple Fn key (⌃Fn) always works too.
-    var triggerKey: (page: UInt32, usage: UInt32) {
+    var triggerKey: KeyChord {
         get {
             let page = defaults.integer(forKey: Keys.triggerKeyPage)
             let usage = defaults.integer(forKey: Keys.triggerKeyUsage)
-            guard page > 0, usage > 0 else { return (0x07, 0xE0) }
-            return (UInt32(page), UInt32(usage))
+            let mods = defaults.integer(forKey: Keys.triggerKeyMods)
+            guard page > 0, usage > 0 else { return KeyChord(page: 0x07, usage: 0xE0, modifiersRaw: 0) }
+            return KeyChord(page: UInt32(page), usage: UInt32(usage), modifiersRaw: UInt(mods))
         }
         set {
             defaults.set(Int(newValue.page), forKey: Keys.triggerKeyPage)
             defaults.set(Int(newValue.usage), forKey: Keys.triggerKeyUsage)
+            defaults.set(Int(newValue.modifiersRaw), forKey: Keys.triggerKeyMods)
         }
     }
 
-    /// Optional dedicated key toggling the locked (long-form) recording.
+    /// Optional dedicated chord toggling the locked (long-form) recording.
     /// nil = not set; trigger+Shift is then the only long-form gesture.
-    var longTriggerKey: (page: UInt32, usage: UInt32)? {
+    var longTriggerKey: KeyChord? {
         get {
             let page = defaults.integer(forKey: Keys.longTriggerKeyPage)
             let usage = defaults.integer(forKey: Keys.longTriggerKeyUsage)
+            let mods = defaults.integer(forKey: Keys.longTriggerKeyMods)
             guard page > 0, usage > 0 else { return nil }
-            return (UInt32(page), UInt32(usage))
+            return KeyChord(page: UInt32(page), usage: UInt32(usage), modifiersRaw: UInt(mods))
         }
         set {
             defaults.set(Int(newValue?.page ?? 0), forKey: Keys.longTriggerKeyPage)
             defaults.set(Int(newValue?.usage ?? 0), forKey: Keys.longTriggerKeyUsage)
+            defaults.set(Int(newValue?.modifiersRaw ?? 0), forKey: Keys.longTriggerKeyMods)
         }
     }
 
