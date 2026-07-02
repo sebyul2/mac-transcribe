@@ -125,7 +125,11 @@ final class ChatGPTOAuth {
     // MARK: - Callback server (localhost:1455)
 
     private func startCallbackServer() throws {
-        let listener = try NWListener(using: .tcp, on: Self.callbackPort)
+        // Bind to loopback only: the default binds to all interfaces, which
+        // would expose the OAuth callback server to the local network.
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: Self.callbackPort)
+        let listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] connection in
             connection.start(queue: .main)
             connection.receive(minimumIncompleteLength: 1, maximumLength: 32768) { data, _, _, _ in

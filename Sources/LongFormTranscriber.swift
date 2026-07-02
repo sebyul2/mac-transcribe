@@ -63,9 +63,11 @@ final class LongFormTranscriber {
         let myGen = gen
         isRunning = true
         didFinish = false
+        stateLock.lock()
         finalizedText = ""
         volatileText = ""
         sessionPeakLevel = 0
+        stateLock.unlock()
         tapBufferCount = 0
         Task { await run(language: language, gen: myGen) }
     }
@@ -80,10 +82,13 @@ final class LongFormTranscriber {
         }
         isRunning = false
         stopEngine()
-        inputBuilder?.finish()
+        stateLock.lock()
+        let builder = inputBuilder
         inputBuilder = nil
-        onLevel?(0)
         let analyzer = self.analyzer
+        stateLock.unlock()
+        builder?.finish()
+        onLevel?(0)
         Task {
             // Wait for the analyzer to process everything already yielded, so
             // the last words are not cut off.
@@ -126,8 +131,7 @@ final class LongFormTranscriber {
                 return
             }
             guard !stale() else { deliverFinish(gen: myGen); return }
-            self.transcriber = transcriber
-            analyzerFormat = format
+            setPipeline(transcriber: transcriber, format: format)
 
             let (stream, builder) = AsyncStream<AnalyzerInput>.makeStream()
             let analyzer = SpeechAnalyzer(modules: [transcriber])
@@ -138,8 +142,7 @@ final class LongFormTranscriber {
                 deliverFinish(gen: myGen)
                 return
             }
-            inputBuilder = builder
-            self.analyzer = analyzer
+            setStream(builder: builder, analyzer: analyzer)
 
             startResultsTask(transcriber, gen: myGen)
 
@@ -155,6 +158,22 @@ final class LongFormTranscriber {
             stopEngine()
             deliverFinish(gen: myGen)
         }
+    }
+
+    /// Synchronous helpers so the async run() never touches the lock directly
+    /// (NSLock is unavailable from async contexts in Swift 6 language mode).
+    private func setPipeline(transcriber: SpeechTranscriber, format: AVAudioFormat) {
+        stateLock.lock()
+        self.transcriber = transcriber
+        analyzerFormat = format
+        stateLock.unlock()
+    }
+
+    private func setStream(builder: AsyncStream<AnalyzerInput>.Continuation, analyzer: SpeechAnalyzer) {
+        stateLock.lock()
+        inputBuilder = builder
+        self.analyzer = analyzer
+        stateLock.unlock()
     }
 
     private func startResultsTask(_ transcriber: SpeechTranscriber, gen myGen: Int) {
@@ -211,14 +230,25 @@ final class LongFormTranscriber {
                 AVNumberOfChannelsKey: format.channelCount,
                 AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
             ]
-            backupFile = try? AVAudioFile(
+            let file = try? AVAudioFile(
                 forWriting: url, settings: settings,
                 commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-            SpeechService.diag("longform audio backup \(backupFile == nil ? "FAILED" : "recording") -> \(url.lastPathComponent)")
+            stateLock.lock()
+            backupFile = file
+            stateLock.unlock()
+            SpeechService.diag("longform audio backup \(file == nil ? "FAILED" : "recording") -> \(url.lastPathComponent)")
         }
 
-        if let analyzerFormat, analyzerFormat != format {
-            converter = AVAudioConverter(from: format, to: analyzerFormat)
+        if let fmt = analyzerFormat, fmt != format {
+            // A silent fallback to unconverted buffers would feed the analyzer
+            // a format it did not ask for — fail loudly instead.
+            guard let conv = AVAudioConverter(from: format, to: fmt) else {
+                throw NSError(domain: "MacWhisper", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "cannot convert \(format.sampleRate)Hz to analyzer format \(fmt.sampleRate)Hz"])
+            }
+            stateLock.lock()
+            converter = conv
+            stateLock.unlock()
         }
 
         inputNode.removeTap(onBus: 0)
@@ -230,17 +260,32 @@ final class LongFormTranscriber {
     }
 
     private var tapBufferCount = 0
+    /// Serial queue for the audio backup: AVAudioFile.write is blocking disk
+    /// I/O and must never run on the real-time audio tap thread, where its
+    /// latency causes glitches and frame drops.
+    private let backupQueue = DispatchQueue(label: "macwhisper.audio-backup", qos: .utility)
+
     private func handleTap(_ buffer: AVAudioPCMBuffer) {
+        // Snapshot the shared state under the lock; these properties are
+        // mutated from the session pipeline on other threads.
         stateLock.lock()
         let backup = backupFile
         let builder = inputBuilder
+        let converter = self.converter
+        let analyzerFormat = self.analyzerFormat
         stateLock.unlock()
 
-        try? backup?.write(from: buffer)
+        if let backup, let copy = Self.copyBuffer(buffer) {
+            // Copy first — the engine reuses the tap buffer after this block
+            // returns — then write off the audio thread.
+            backupQueue.async { try? backup.write(from: copy) }
+        }
 
         // Waveform level, throttled to ~50 Hz.
         let level = Self.level(from: buffer)
+        stateLock.lock()
         if level > sessionPeakLevel { sessionPeakLevel = level }
+        stateLock.unlock()
         tapBufferCount += 1
         if tapBufferCount <= 3 || tapBufferCount % 500 == 0 {
             SpeechService.diag("longform tap #\(tapBufferCount) level=\(level) frames=\(buffer.frameLength)")
@@ -285,8 +330,11 @@ final class LongFormTranscriber {
         }
         audioEngine = nil
         stateLock.lock()
-        backupFile = nil // closes the file
+        let file = backupFile
+        backupFile = nil
         stateLock.unlock()
+        // Release the file on the backup queue, after any in-flight write.
+        if let file { backupQueue.async { _ = file } }
     }
 
     private func deliverFinish(gen myGen: Int) {
@@ -296,14 +344,35 @@ final class LongFormTranscriber {
         stateLock.unlock()
         guard !alreadyDone else { return }
         isRunning = false
+        // These are read by handleTap and stop() on other threads.
+        stateLock.lock()
         resultsTask?.cancel()
         resultsTask = nil
         analyzer = nil
         transcriber = nil
         converter = nil
+        analyzerFormat = nil
+        let peak = sessionPeakLevel
+        stateLock.unlock()
         let transcript = combinedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        SpeechService.diag("longform end chars=\(transcript.count) peak=\(sessionPeakLevel)")
+        SpeechService.diag("longform end chars=\(transcript.count) peak=\(peak)")
         DispatchQueue.main.async { [weak self] in self?.onFinished?(transcript) }
+    }
+
+    /// Deep-copies a PCM buffer so it can outlive the tap callback (the engine
+    /// reuses tap buffers once the block returns).
+    private static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else {
+            return nil
+        }
+        copy.frameLength = buffer.frameLength
+        let src = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
+        let dst = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        for (s, d) in zip(src, dst) {
+            guard let sData = s.mData, let dData = d.mData else { return nil }
+            memcpy(dData, sData, Int(min(s.mDataByteSize, d.mDataByteSize)))
+        }
+        return copy
     }
 
     private static func level(from buffer: AVAudioPCMBuffer) -> Float {

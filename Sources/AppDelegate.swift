@@ -577,6 +577,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter.string(from: Date())
     }
 
+    /// Serial queue for transcript autosaves — atomic writes on the main
+    /// thread would stutter the UI during long sessions.
+    private let autosaveQueue = DispatchQueue(label: "macwhisper.autosave", qos: .utility)
+
     /// Continuously mirrors the locked session's partial transcript to disk so a
     /// crash or recognition failure can never lose more than ~2 seconds of text.
     private func autosaveLockedTranscript(_ text: String) {
@@ -584,7 +588,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let now = Date()
         guard now.timeIntervalSince(lastAutosaveAt) >= 2 else { return }
         lastAutosaveAt = now
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+        autosaveQueue.async {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 
     /// Refines a saved long-form transcript with the configured LLM and updates
