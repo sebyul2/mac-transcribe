@@ -144,16 +144,42 @@ final class SubtitleOverlay {
         }
     }
 
+    /// Splits into sentences on Korean/Latin/CJK sentence-ending punctuation,
+    /// keeping the punctuation attached.
+    private static func sentences(of text: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ".?!。？！".contains(ch) {
+                let trimmed = current.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { result.append(trimmed) }
+                current = ""
+            }
+        }
+        let trimmed = current.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { result.append(trimmed) }
+        return result
+    }
+
     /// Feeds the full accumulated transcript; the overlay shows only the tail,
     /// caption-style, and only once there is actual speech to show.
     func update(fullText: String) {
         guard armed else { return }
         // No captions until something was actually said.
         guard fullText.contains(where: { $0.isLetter || $0.isNumber }) else { return }
-        var tail = String(fullText.suffix(tailLength))
-        // Avoid starting mid-word when we cut into the text.
-        if tail.count == tailLength, let space = tail.firstIndex(of: " ") {
-            tail = String(tail[tail.index(after: space)...])
+        // Real-subtitle line breaking: the last two sentences, one per line,
+        // so a continuing speech wraps at utterance boundaries instead of
+        // stretching into one endless line.
+        let recent = Self.sentences(of: String(fullText.suffix(tailLength * 2))).suffix(2)
+        var tail = recent.joined(separator: "\n")
+        if tail.count > tailLength {
+            // A single run-on sentence: fall back to a word-aligned tail and
+            // let the label wrap it.
+            tail = String(tail.suffix(tailLength))
+            if let space = tail.firstIndex(of: " ") {
+                tail = String(tail[tail.index(after: space)...])
+            }
         }
         textField.stringValue = tail
         layout(for: tail.isEmpty ? " " : tail)
@@ -175,7 +201,9 @@ final class SubtitleOverlay {
         // external monitor is the main one).
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vis = screen.visibleFrame
-        let maxTextWidth = vis.width * 0.7 - hPadding * 2
+        // Cap the caption width like real subtitles — on wide monitors 70% of
+        // the screen let a single line run absurdly long before wrapping.
+        let maxTextWidth = min(vis.width * 0.55, 720) - hPadding * 2
 
         let bounding = (text as NSString).boundingRect(
             with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
