@@ -293,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let shiftDetectionDelay: TimeInterval = 0.15
     /// Ignore the lock hotkey again for this long after locking, so holding
     /// the combo a beat too long can't immediately stop the new session.
-    private static let lockToggleGrace: TimeInterval = 1.0
+    private static let lockToggleGrace: TimeInterval = 1.5
 
     /// How long after Fn goes down we keep watching for Ctrl/Shift to arrive.
     /// Modifiers may be pressed in any order; past this window a bare Fn hold
@@ -443,7 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sleepActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleSystemSleepDisabled, .userInitiated],
             reason: "MacWhisper locked recording")
-        SystemAudio.muteOutput()
+        // Note: unlike push-to-talk, locked recording does NOT mute the system
+        // output — meeting audio must stay audible, and the mute was silencing
+        // the start-feedback sound itself.
         // No floating HUD for locked sessions — the transcript window (opened
         // from the menu) and the menu-bar icon carry the feedback.
         transcriptWindow.updateTranscript("")
@@ -464,7 +466,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isLockedRecording, !lockStopping else { return }
         lockStopping = true
         NSLog("MacWhisper[App]: locked recording stopping")
-        SystemAudio.restoreOutput()
         NSSound(named: "Bottle")?.play()
         subtitles.flashStatus("■ 녹음 종료 — 저장 중…")
         transcriptWindow.setStatus("Finishing…")

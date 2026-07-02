@@ -143,9 +143,10 @@ final class LongFormTranscriber {
 
             startResultsTask(transcriber, gen: myGen)
 
-            // Prefer the built-in mic (matches SpeechService behavior) so a
-            // Bluetooth headset isn't dragged into low-quality call mode.
-            SystemAudio.useBuiltInInput()
+            // Use the system default input as-is. Forcing the built-in mic
+            // (like push-to-talk does) records silence in clamshell mode with
+            // an external display — the lid mic hears nothing — and a meeting
+            // setup often has a better external mic selected anyway.
             guard !stale() else { deliverFinish(gen: myGen); return }
             try await MainActor.run { try startEngine() }
             SpeechService.diag("longform running")

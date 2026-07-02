@@ -167,6 +167,7 @@ final class FnKeyMonitor {
     /// non-Karabiner keyboard reports through both paths.
     private func handleFlagsChanged(_ event: NSEvent) {
         let keyCode = event.keyCode
+        SpeechService.diag("flagsChanged keyCode=\(keyCode) flags=0x\(String(event.modifierFlags.rawValue, radix: 16)) trigger=(\(customTrigger.page),\(customTrigger.usage))")
 
         // Modifier capture for the settings window (HID capture misses
         // Karabiner-processed modifiers entirely).
@@ -182,7 +183,7 @@ final class FnKeyMonitor {
            let code = Self.modifierUsageToKeyCode[customTrigger.usage], code == keyCode {
             let pressed = Self.modifierFlagActive(for: customTrigger.usage, flags: event.modifierFlags)
             if pressed != customDown {
-                updateTrigger(&customDown, pressed: pressed, source: .custom, label: "Trigger(flags)")
+                updateTrigger(pressed: pressed, source: .custom, label: "Trigger(flags)")
             }
         }
 
@@ -206,6 +207,12 @@ final class FnKeyMonitor {
 
         let pressed = IOHIDValueGetIntegerValue(value) != 0
 
+        // Diagnostic: record every modifier/Fn HID event (low volume) so
+        // "trigger key does nothing" reports show exactly what arrives.
+        if page == fnUsagePage || (page == UInt32(kHIDPage_KeyboardOrKeypad) && usage >= 0xE0 && usage <= 0xE7) {
+            SpeechService.diag("hid key page=\(page) usage=\(usage) pressed=\(pressed) trigger=(\(customTrigger.page),\(customTrigger.usage))")
+        }
+
         // Trigger-key capture for the settings window: deliver the next real
         // key press (any keyboard key or the Apple Fn) and swallow it.
         if let capture = captureNextKey, pressed {
@@ -220,7 +227,7 @@ final class FnKeyMonitor {
 
         if page == fnUsagePage, usage == fnUsage {
             guard pressed != fnDown else { return }
-            updateTrigger(&fnDown, pressed: pressed, source: .appleFn, label: "Fn")
+            updateTrigger(pressed: pressed, source: .appleFn, label: "Fn")
             return
         }
 
@@ -241,7 +248,7 @@ final class FnKeyMonitor {
         // substitute on external (Windows) keyboards.
         if page == customTrigger.page, usage == customTrigger.usage {
             guard pressed != customDown else { return }
-            updateTrigger(&customDown, pressed: pressed, source: .custom, label: "Trigger")
+            updateTrigger(pressed: pressed, source: .custom, label: "Trigger")
             return
         }
 
@@ -261,10 +268,19 @@ final class FnKeyMonitor {
     /// Applies a trigger-key state change and fires down/up only when the
     /// combined trigger state actually flips, so holding Fn and the custom
     /// trigger together can't double-fire.
-    private func updateTrigger(_ key: inout Bool, pressed: Bool, source: TriggerSource, label: String) {
+    ///
+    /// The key state is selected by `source` instead of being passed inout:
+    /// an inout binding overlapping the `triggerDown` getter (which reads the
+    /// same stored properties) is a Swift exclusivity violation that aborted
+    /// the app the moment any trigger key was pressed.
+    private func updateTrigger(pressed: Bool, source: TriggerSource, label: String) {
         let before = triggerDown
-        key = pressed
+        switch source {
+        case .appleFn: fnDown = pressed
+        case .custom: customDown = pressed
+        }
         let after = triggerDown
+        SpeechService.diag("updateTrigger \(label) pressed=\(pressed) before=\(before) after=\(after)")
         guard before != after else { return }
         let at = Date()
         NSLog("MacWhisper[Fn]: \(label) \(pressed ? "DOWN" : "UP")")

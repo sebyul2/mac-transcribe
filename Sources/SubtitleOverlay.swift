@@ -170,7 +170,10 @@ final class SubtitleOverlay {
     // MARK: - Layout
 
     private func layout(for text: String) {
-        guard let screen = NSScreen.screens.first else { return }
+        // Prefer the active screen so captions appear where the user is
+        // looking (screens.first can be the closed built-in display when an
+        // external monitor is the main one).
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vis = screen.visibleFrame
         let maxTextWidth = vis.width * 0.7 - hPadding * 2
 
