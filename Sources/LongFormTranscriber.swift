@@ -187,6 +187,7 @@ final class LongFormTranscriber {
         voiceActive = false
         lastVoiceAt = .distantPast
         levelEnvelope = 0
+        lastFinalizedAudioEnd = 0
         Task { await run(language: language, gen: myGen) }
     }
 
@@ -316,10 +317,21 @@ final class LongFormTranscriber {
                     // volatile results have no time structure at all — one
                     // range spanning all processed audio). Segment finals on
                     // those hidden pauses so the transcript gets its utterance
-                    // structure the moment text is finalized.
-                    let text = result.isFinal
-                        ? Self.segmentedFinalText(result)
-                        : String(result.text.characters)
+                    // structure the moment text is finalized. Words covering
+                    // audio that was ALREADY finalized are dropped — the
+                    // recognizer sometimes re-transcribes a span it committed
+                    // earlier, which used to duplicate whole exchanges in the
+                    // transcript (and got them re-translated).
+                    let text: String
+                    if result.isFinal {
+                        text = Self.segmentedFinalText(result, skippingAudioBefore: lastFinalizedAudioEnd)
+                        let end = result.range.end.seconds
+                        if end.isFinite {
+                            lastFinalizedAudioEnd = max(lastFinalizedAudioEnd, end)
+                        }
+                    } else {
+                        text = String(result.text.characters)
+                    }
                     let combined = self.fold(text: text, isFinal: result.isFinal)
                     let stable = self.stableLength
                     DispatchQueue.main.async { self.onTranscript?(combined, stable) }
@@ -348,14 +360,20 @@ final class LongFormTranscriber {
     /// work anchored to the present instead of re-rendering the past.
     private let maxOpenTurnChars = 25
 
-    /// Called with stateLock held, after appending finalized text.
+    /// Called with stateLock held, after appending finalized text. Loops:
+    /// a re-transcribed or long final can land several sentences at once, and
+    /// a single cut would leave the open turn still over the limit.
     private func sealOverlongOpenTurnLocked() {
-        let openStart = finalizedText.range(of: "\n\n", options: .backwards)?.upperBound
-            ?? finalizedText.startIndex
-        let open = finalizedText[openStart...]
-        guard open.count >= maxOpenTurnChars else { return }
-        guard let terminator = open.lastIndex(where: { ".?!。？！\n".contains($0) }) else { return }
-        finalizedText.insert(contentsOf: "\n\n", at: finalizedText.index(after: terminator))
+        for _ in 0..<8 {
+            let openStart = finalizedText.range(of: "\n\n", options: .backwards)?.upperBound
+                ?? finalizedText.startIndex
+            let open = finalizedText[openStart...]
+            guard open.count >= maxOpenTurnChars else { return }
+            // Cut at the FIRST sentence boundary so a multi-sentence blob
+            // seals sentence by sentence, each becoming its own turn.
+            guard let terminator = open.firstIndex(where: { ".?!。？！\n".contains($0) }) else { return }
+            finalizedText.insert(contentsOf: "\n\n", at: finalizedText.index(after: terminator))
+        }
     }
 
     /// Rebuilds a final result's text with newlines at the speech pauses the
@@ -365,7 +383,11 @@ final class LongFormTranscriber {
     /// (the pause follows the mark) — so the break lands before or after
     /// accordingly. A long leading run also marks the boundary against the
     /// PREVIOUS final, which matters now that finalization runs every ~2.5 s.
-    private static func segmentedFinalText(_ result: SpeechTranscriber.Result) -> String {
+    /// Furthest audio time (seconds) already committed to finalizedText;
+    /// touched only from the results task.
+    private var lastFinalizedAudioEnd: Double = 0
+
+    private static func segmentedFinalText(_ result: SpeechTranscriber.Result, skippingAudioBefore cutoff: Double) -> String {
         var out = ""
         var pendingBreak: String? = nil
         func noteBreak(_ duration: Double) {
@@ -373,6 +395,10 @@ final class LongFormTranscriber {
             if pendingBreak != "\n\n" { pendingBreak = mark }
         }
         for run in result.text.runs {
+            // Re-transcription of audio that was already finalized — skip.
+            if let range = run.audioTimeRange, range.end.seconds <= cutoff + 0.05 {
+                continue
+            }
             let piece = String(result.text[run.range].characters)
             let isSpoken = piece.contains { !$0.isWhitespace && !$0.isPunctuation }
             let duration = run.audioTimeRange.map { $0.end.seconds - $0.start.seconds } ?? 0
