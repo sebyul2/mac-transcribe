@@ -376,10 +376,17 @@ final class InterpreterEngine {
         }
         openTranslation = (key, text)
         lastOpenApplyAt = now
-        // The LLM now covers everything the tail draft covered.
-        if let t = tailTranslation,
-           Self.remainderAfterNormalizedPrefix(of: key, key: Self.normalizedKey(t.source)) != nil {
-            tailTranslation = nil
+        // Re-evaluate the on-device tail against the NEW coverage: keep it
+        // only if it translates exactly what the LLM still hasn't covered.
+        // (The old check compared the wrong way around and never fired, so a
+        // stale tail — already covered by the LLM — stayed glued to the
+        // caption as a duplicate translation.)
+        if let t = tailTranslation {
+            let (_, open) = parseTurns(lastFullText)
+            let remainder = open.flatMap { Self.remainderAfterNormalizedPrefix(of: $0, key: key) }
+            if remainder == nil || Self.normalizedKey(t.source) != Self.normalizedKey(remainder!) {
+                tailTranslation = nil
+            }
         }
     }
 
