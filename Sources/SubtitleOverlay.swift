@@ -24,12 +24,13 @@ final class SubtitleOverlay {
     private let vPadding: CGFloat = 10
     private let bottomMargin: CGFloat = 14
     private let cornerRadius: CGFloat = 8
-    /// Caption height in lines/sentences: 2 for plain recording, 3 in
-    /// interpreter mode where translations trail speech and benefit from the
-    /// extra line of continuity.
-    var maxLines = 2 {
-        didSet { textField.maximumNumberOfLines = maxLines }
-    }
+    /// How many caption pieces (sentences / speaker turns) to show.
+    var maxLines = 2
+    /// Hard cap on RENDERED lines — pieces wrap, so this exceeds maxLines.
+    /// The label must never clip the newest text: a turn line that wrapped to
+    /// an extra rendered line used to lose its final characters ("엘레나
+    /// 체이스" → "엘레나 체이").
+    private let renderedLineCap = 4
     /// Roughly the last caption-worth of text to show.
     private var tailLength: Int { maxLines * 70 }
     private let closeSize: CGFloat = 20
@@ -75,7 +76,7 @@ final class SubtitleOverlay {
         textField.isEditable = false
         textField.isSelectable = false
         textField.alignment = .center
-        textField.maximumNumberOfLines = maxLines
+        textField.maximumNumberOfLines = renderedLineCap
         textField.lineBreakMode = .byTruncatingHead
         captionBox.addSubview(textField)
 
@@ -242,14 +243,16 @@ final class SubtitleOverlay {
         // Korean sentence before its final particle) reads terribly.
         let maxTextWidth = min(vis.width * 0.72, 1000) - hPadding * 2
 
-        let bounding = (text as NSString).boundingRect(
-            with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
+        // Measure with the field's OWN metrics: boundingRect reports the
+        // ideal typographic width, which runs a couple of points narrower
+        // than what NSTextField actually needs — so the last character of
+        // every line wrapped onto a line of its own ("뭐하고 있나 / 요").
+        // The field's content is already set when layout() runs.
+        let fitting = textField.sizeThatFits(
+            NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude))
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        let textHeight = min(ceil(bounding.height), lineHeight * CGFloat(maxLines))
-        let textWidth = min(maxTextWidth, max(160, ceil(bounding.width)))
+        let textHeight = min(ceil(fitting.height), lineHeight * CGFloat(renderedLineCap))
+        let textWidth = min(maxTextWidth, max(160, ceil(fitting.width) + 4))
 
         let boxWidth = textWidth + hPadding * 2
         let boxHeight = textHeight + vPadding * 2

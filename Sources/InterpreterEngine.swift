@@ -268,6 +268,11 @@ final class InterpreterEngine {
             context: previous,
             contextTranslation: previousTranslation,
             isFragment: true,
+            // Continuation, not retranslation: the previous on-screen text is
+            // in the prompt with orders to reuse its wording verbatim, so the
+            // caption extends instead of being erased and rewritten (and the
+            // register can't flip between polite and casual every round).
+            previousOpenTranslation: openTranslation?.text,
             onPartial: { [weak self] partial in
                 guard let self, seq >= self.openAppliedSeq else { return }
                 self.openAppliedSeq = seq
@@ -288,6 +293,21 @@ final class InterpreterEngine {
     }
 
     private func applyOpenTranslation(key: String, text: String) {
+        // Hard stability guard: if the model ignored the reuse instruction
+        // and rewrote most of what is already on screen, keep the screen —
+        // the frozen pass will deliver the polished version once the turn
+        // closes. (Streamed partials are exempt while shorter than the
+        // previous text; they are still catching up to it.)
+        if let previous = openTranslation?.text {
+            // A shorter text is a streamed partial still catching up to what
+            // is already shown — replacing would make the caption shrink and
+            // regrow every round.
+            if text.count < previous.count { return }
+            if previous.count > 20 {
+                let common = zip(previous, text).prefix { $0 == $1 }.count
+                if common < previous.count / 2 { return }
+            }
+        }
         openTranslation = (key, text)
         // The LLM now covers everything the tail draft covered.
         if let t = tailTranslation,
@@ -348,6 +368,7 @@ final class InterpreterEngine {
         context: String?,
         contextTranslation: String?,
         isFragment: Bool = false,
+        previousOpenTranslation: String? = nil,
         onPartial: ((String) -> Void)? = nil,
         completion: @escaping (String?) -> Void
     ) {
@@ -358,6 +379,7 @@ final class InterpreterEngine {
             context: context,
             contextTranslation: contextTranslation,
             isFragment: isFragment,
+            previousTranslation: previousOpenTranslation,
             onPartial: onPartial.map { deliver in
                 { partial in
                     DispatchQueue.main.async { [weak self] in

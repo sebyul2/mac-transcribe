@@ -155,6 +155,7 @@ enum LLMRefiner {
         context: String? = nil,
         contextTranslation: String? = nil,
         isFragment: Bool = false,
+        previousTranslation: String? = nil,
         onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
@@ -170,7 +171,19 @@ enum LLMRefiner {
             }
         }
         if isFragment {
-            prompt += "\n\nThe text is an unfinished sentence still being spoken; translate the fragment naturally as-is, without completing it."
+            prompt += "\n\nThe text is an unfinished utterance still being spoken; translate it naturally as-is, without completing it."
+        }
+        if let previousTranslation {
+            prompt += """
+
+
+            Your previous translation of this same, still-growing utterance (shown live on screen): \
+            \(previousTranslation)
+            The source has grown since. Reuse the previous translation's wording VERBATIM as the \
+            beginning of your output and extend it to cover the new material. Only change an \
+            existing word if the source revision made it factually wrong — never rephrase for \
+            style, tone, or flow. A stable prefix matters more than elegance.
+            """
         }
         request(
             text: text,

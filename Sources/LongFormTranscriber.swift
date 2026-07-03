@@ -324,7 +324,7 @@ final class LongFormTranscriber {
     /// separates speaker turns ("\n\n" — the interpreter breaks translation
     /// context there, but not between one speaker's consecutive sentences).
     private static let pauseRunDuration = 0.8
-    private static let turnRunDuration = 1.2
+    private static let turnRunDuration = 1.0
 
     /// Set when a real silence preceded whatever finalizes next; consumed by
     /// fold() as a leading turn break.
