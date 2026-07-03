@@ -18,10 +18,18 @@ import Foundation
 final class InterpreterEngine {
     /// English name of the target language, interpolated into the LLM prompt.
     var targetLanguage = "English"
-    /// Combined display text, delivered on the main thread.
-    var onDisplay: ((String) -> Void)?
+    /// Delivered on the main thread after every change: the full translated
+    /// log (for the transcript window) and the caption tail (for the subtitle
+    /// overlay — only the newest sentence + in-progress tail, so captions
+    /// never reach back into old dialogue while fresh translations are still
+    /// in flight).
+    var onDisplay: ((_ full: String, _ caption: String) -> Void)?
 
-    /// Completed sentence → frozen translation.
+    /// Normalized completed sentence → frozen translation. Keys strip
+    /// whitespace and punctuation because the recognizer keeps re-drawing
+    /// sentence boundaries (especially Chinese punctuation arrives late); a
+    /// raw-text key would miss the cache on every such wobble and re-translate
+    /// sentences that were already on screen.
     private var translations: [String: String] = [:]
     private var pending: Set<String> = []
     private var lastFullText = ""
@@ -105,23 +113,31 @@ final class InterpreterEngine {
         // sentences (and their translations, when known) as context. Streamed
         // partials show up immediately and the final result overwrites them.
         for (index, sentence) in parts.completed.enumerated() {
-            guard translations[sentence] == nil, !pending.contains(sentence) else { continue }
-            pending.insert(sentence)
+            let key = Self.normalizedKey(sentence)
+            guard translations[key] == nil, !pending.contains(key) else { continue }
+            pending.insert(key)
             let (context, contextTranslation) = promptContext(before: index, in: parts.completed)
             requestTranslation(
                 of: sentence,
                 context: context,
                 contextTranslation: contextTranslation,
-                onPartial: { [weak self] sentence, partial in
-                    self?.translations[sentence] = partial
+                onPartial: { [weak self] _, partial in
+                    self?.translations[key] = partial
                 },
-                apply: { [weak self] sentence, translated in
-                    self?.translations[sentence] = translated
+                apply: { [weak self] _, translated in
+                    self?.translations[key] = translated
                 }
             )
         }
         maybeTranslateTail()
         emit()
+    }
+
+    /// Cache key for a sentence: content only, ignoring whitespace and
+    /// punctuation, so late-arriving or re-drawn punctuation still hits.
+    private static func normalizedKey(_ sentence: String) -> String {
+        let stripped = sentence.filter { !$0.isWhitespace && !$0.isPunctuation }
+        return stripped.isEmpty ? sentence : stripped
     }
 
     /// The last few sentences before `index`, joined, plus their joined
@@ -130,7 +146,7 @@ final class InterpreterEngine {
     private func promptContext(before index: Int, in completed: [String]) -> (String?, String?) {
         let previous = completed[..<index].suffix(contextSentences)
         guard !previous.isEmpty else { return (nil, nil) }
-        let translated = previous.compactMap { translations[$0] }
+        let translated = previous.compactMap { translations[Self.normalizedKey($0)] }
         return (
             previous.joined(separator: " "),
             translated.count == previous.count ? translated.joined(separator: " ") : nil
@@ -203,7 +219,7 @@ final class InterpreterEngine {
         func finish(_ translated: String?) {
             DispatchQueue.main.async { [weak self] in
                 guard let self, myGen == self.gen else { return }
-                self.pending.remove(text)
+                self.pending.remove(Self.normalizedKey(text))
                 let trimmed = translated?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 // Keep the original visible rather than blocking the feed.
                 apply(text, trimmed.isEmpty ? text : trimmed)
@@ -251,7 +267,24 @@ final class InterpreterEngine {
     /// still falls back to its source via apply(), so content can't vanish.)
     var displayText: String {
         let parts = split(lastFullText)
-        var pieces = parts.completed.compactMap { translations[$0] }
+        var pieces = parts.completed.compactMap { translations[Self.normalizedKey($0)] }
+        if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
+            pieces.append(t.text)
+        }
+        return pieces.joined(separator: " ")
+    }
+
+    /// What the subtitle overlay shows: the newest completed sentence's
+    /// translation (when it has arrived) plus the live tail. Deliberately NOT
+    /// a suffix of displayText — there, sentences whose translations are still
+    /// in flight drop out, so the "last two sentences" would reach back into
+    /// old dialogue and captions would jump between past and present.
+    var captionText: String {
+        let parts = split(lastFullText)
+        var pieces: [String] = []
+        if let last = parts.completed.last, let translated = translations[Self.normalizedKey(last)] {
+            pieces.append(translated)
+        }
         if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
             pieces.append(t.text)
         }
@@ -259,7 +292,7 @@ final class InterpreterEngine {
     }
 
     private func emit() {
-        onDisplay?(displayText)
+        onDisplay?(displayText, captionText)
     }
 
     // MARK: - Sentence splitting

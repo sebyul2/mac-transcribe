@@ -336,9 +336,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.autosaveLockedTranscript(text)
         }
-        interpreter.onDisplay = { [weak self] display in
+        interpreter.onDisplay = { [weak self] display, caption in
             self?.transcriptWindow.updateTranscript(display)
-            self?.subtitles.update(fullText: display)
+            // Captions get only the newest sentence + live tail; feeding the
+            // full log here made the "last two sentences" reach back into old
+            // dialogue whenever recent translations were still in flight.
+            self?.subtitles.update(fullText: caption)
         }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         longForm.onStatus = { [weak self] status in
