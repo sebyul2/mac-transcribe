@@ -493,6 +493,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if mode == .interpreter {
             interpreter.reset()
             interpreter.targetLanguage = settings.interpreterTargetLanguage
+            // Prefer Apple's on-device translation (tens of ms per request);
+            // until it reports ready — or if the pair is unsupported — the
+            // engine transparently falls back to the LLM.
+            interpreter.prepareOnDevice(
+                source: settings.language.locale.language,
+                target: InterpreterEngine.localeLanguage(forPrompt: settings.interpreterTargetLanguage))
         }
         longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
         NSLog("MacWhisper[App]: locked recording started mode=\(mode)")
@@ -567,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         transcriptWindow.setRecording(false)
         subtitles.hide()
+        interpreter.teardown()
         finishLockedSession(with: text)
         rebuildMenu()
     }
