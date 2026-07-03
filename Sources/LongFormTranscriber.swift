@@ -88,16 +88,13 @@ final class LongFormTranscriber {
             voiceActive = true
             lastVoiceAt = now
         } else if voiceActive, now.timeIntervalSince(lastVoiceAt) >= utteranceSilenceGap {
-            // Real speech pause: the utterance is over. Mark the turn and
-            // finalize immediately so its exact boundaries (and the
-            // interpreter's quality pass) arrive right away.
+            // Real speech pause: the utterance is over. Finalize immediately
+            // and SEAL the turn behind it, so its quality translation runs
+            // now — not when the next speaker happens to start.
             voiceActive = false
-            SpeechService.diag("longform silence -> finalize (envelope=\(levelEnvelope))")
-            stateLock.lock()
-            pendingTurnBreak = true
-            stateLock.unlock()
+            SpeechService.diag("longform silence -> finalize+seal (envelope=\(levelEnvelope))")
             lastFinalizeAt = now
-            requestFinalize()
+            requestFinalize(sealTurnAfter: true)
             return
         }
         // Stale-hypothesis finalize: the recognizer hasn't revised its
@@ -116,8 +113,13 @@ final class LongFormTranscriber {
 
     /// Asks the analyzer to finalize everything heard so far. No-op while a
     /// previous request is in flight or when there is nothing volatile.
+    /// With `sealTurnAfter` (a real silence was heard), a turn boundary is
+    /// written BEHIND the finalized text once the analyzer drains — the old
+    /// approach of prefixing the break onto the NEXT final left the just-
+    /// finished utterance in the open turn until the next speaker started,
+    /// which is exactly when its quality translation stalled.
     private var finalizeInFlight = false
-    private func requestFinalize() {
+    private func requestFinalize(sealTurnAfter: Bool = false) {
         stateLock.lock()
         let analyzer = self.analyzer
         let shouldRun = !finalizeInFlight && !volatileText.isEmpty && analyzer != nil
@@ -126,15 +128,27 @@ final class LongFormTranscriber {
         guard shouldRun, let analyzer else { return }
         Task { [weak self] in
             try? await analyzer.finalize(through: nil)
-            self?.clearFinalizeInFlight()
+            self?.finishFinalize(sealTurn: sealTurnAfter)
         }
     }
 
     /// Synchronous lock helper (NSLock is unavailable from async contexts).
-    private func clearFinalizeInFlight() {
+    private func finishFinalize(sealTurn: Bool) {
         stateLock.lock()
         finalizeInFlight = false
+        var emit = false
+        // Seal only when the finalize actually drained (no volatile left) and
+        // there is a turn to close.
+        if sealTurn, volatileText.isEmpty, !finalizedText.isEmpty, !finalizedText.hasSuffix("\n\n") {
+            finalizedText += "\n\n"
+            emit = true
+        }
         stateLock.unlock()
+        if emit {
+            let combined = combinedTranscript
+            let stable = stableLength
+            DispatchQueue.main.async { [weak self] in self?.onTranscript?(combined, stable) }
+        }
     }
 
     private var combinedTranscript: String {
@@ -326,10 +340,6 @@ final class LongFormTranscriber {
     private static let pauseRunDuration = 0.8
     private static let turnRunDuration = 1.0
 
-    /// Set when a real silence preceded whatever finalizes next; consumed by
-    /// fold() as a leading turn break.
-    private var pendingTurnBreak = false
-
     /// Rebuilds a final result's text with newlines at the speech pauses the
     /// recognizer absorbed into run durations. Verified against real anime
     /// audio: a long run of spoken text starts a new utterance (the pause
@@ -380,10 +390,6 @@ final class LongFormTranscriber {
             let substantial = text.contains { $0.isLetter || $0.isNumber }
             if substantial {
                 var piece = text
-                if pendingTurnBreak {
-                    pendingTurnBreak = false
-                    if !piece.hasPrefix("\n") { piece = "\n\n" + piece }
-                }
                 if finalizedText.isEmpty {
                     piece = String(piece.drop(while: { $0 == "\n" }))
                 }

@@ -46,7 +46,10 @@ final class InterpreterEngine {
     private var openInFlightCount = 0
     private var lastRequestedOpenKey = ""
     private var lastOpenRequestAt = Date.distantPast
-    private let maxOpenInFlight = 2
+    /// Three slots so 0.35 s pacing isn't throttled by 1-1.5 s round trips —
+    /// with two, both slots sat occupied and the real cadence fell back to
+    /// the response time.
+    private let maxOpenInFlight = 3
     /// Continuation requests mostly emit an unchanged prefix plus the new
     /// material, so they can run far more often than full retranslations did;
     /// the source-key guard already skips rounds where nothing new was heard,
