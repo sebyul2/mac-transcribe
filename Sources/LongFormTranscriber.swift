@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import ScreenCaptureKit
 import Speech
 
 /// Long-form transcription for locked (meeting-style) recordings, built on the
@@ -23,7 +24,19 @@ final class LongFormTranscriber {
     /// When set, every captured buffer is also written to this file (AAC).
     var audioBackupURL: URL?
 
+    /// Where the session captures audio from.
+    enum AudioSource { case microphone, systemAudio }
+    /// Set before start(). System audio uses ScreenCaptureKit (Screen
+    /// Recording permission) and hears what the computer plays — for
+    /// interpreting calls and videos.
+    var audioSource: AudioSource = .microphone
+
+    /// Transient status for the UI (e.g. "downloading model…"), on main.
+    var onStatus: ((String) -> Void)?
+
     private var audioEngine: AVAudioEngine?
+    private var scStream: SCStream?
+    private var scOutput: SystemAudioOutput?
     private var backupFile: AVAudioFile?
     private var analyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
@@ -121,7 +134,11 @@ final class LongFormTranscriber {
             // Download the long-form model for this locale if it's missing.
             if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
                 SpeechService.diag("longform downloading speech assets…")
+                DispatchQueue.main.async { [weak self] in
+                    self?.onStatus?("Downloading \(language.displayName) model…")
+                }
                 try await request.downloadAndInstall()
+                DispatchQueue.main.async { [weak self] in self?.onStatus?("Model ready") }
             }
             guard !stale() else { deliverFinish(gen: myGen); return }
 
@@ -151,8 +168,13 @@ final class LongFormTranscriber {
             // an external display — the lid mic hears nothing — and a meeting
             // setup often has a better external mic selected anyway.
             guard !stale() else { deliverFinish(gen: myGen); return }
-            try await MainActor.run { try startEngine() }
-            SpeechService.diag("longform running")
+            switch audioSource {
+            case .microphone:
+                try await MainActor.run { try startEngine() }
+            case .systemAudio:
+                try await startSystemCapture()
+            }
+            SpeechService.diag("longform running source=\(audioSource)")
         } catch {
             SpeechService.diag("longform FAILED: \(error)")
             stopEngine()
@@ -320,6 +342,123 @@ final class LongFormTranscriber {
         }
     }
 
+    /// Captures the computer's own audio output via ScreenCaptureKit and
+    /// feeds it through the same pipeline as the microphone tap. Requires the
+    /// Screen Recording permission (prompted on first use).
+    private func startSystemCapture() async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let display = content.displays.first else {
+            throw NSError(domain: "MacWhisper", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "no display for system-audio capture"])
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = true
+        config.sampleRate = 48000
+        config.channelCount = 1
+        // Video is unavoidable in the API; keep it as cheap as possible and
+        // simply never attach a video output.
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 5)
+
+        // Open the backup file against the capture format.
+        if let url = audioBackupURL,
+           let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1) {
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: format.channelCount,
+                AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+            ]
+            let file = try? AVAudioFile(
+                forWriting: url, settings: settings,
+                commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            setBackupFile(file)
+            SpeechService.diag("longform audio backup \(file == nil ? "FAILED" : "recording") -> \(url.lastPathComponent) (system audio)")
+        }
+
+        let output = SystemAudioOutput { [weak self] buffer in
+            self?.processCaptured(buffer)
+        }
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue(label: "macwhisper.system-audio"))
+        try await stream.startCapture()
+        setSystemStream(stream, output: output)
+    }
+
+    /// Synchronous lock helpers so async code never touches NSLock directly.
+    private func setBackupFile(_ file: AVAudioFile?) {
+        stateLock.lock()
+        backupFile = file
+        stateLock.unlock()
+    }
+
+    private func setSystemStream(_ stream: SCStream, output: SystemAudioOutput) {
+        stateLock.lock()
+        scStream = stream
+        scOutput = output
+        stateLock.unlock()
+    }
+
+    /// Shared per-buffer pipeline for the system-audio path: backup, level,
+    /// convert, and yield to the analyzer. Mirrors the mic tap.
+    private func processCaptured(_ buffer: AVAudioPCMBuffer) {
+        stateLock.lock()
+        let backup = backupFile
+        let builder = inputBuilder
+        let analyzerFormat = self.analyzerFormat
+        // Lazily create a converter for the capture format if it differs from
+        // what the analyzer asked for.
+        if converter == nil, let fmt = analyzerFormat, fmt != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: fmt)
+        }
+        let converter = self.converter
+        stateLock.unlock()
+
+        if let backup, let copy = Self.copyBuffer(buffer) {
+            backupQueue.async { try? backup.write(from: copy) }
+        }
+
+        let level = Self.level(from: buffer)
+        stateLock.lock()
+        if level > sessionPeakLevel { sessionPeakLevel = level }
+        stateLock.unlock()
+        tapBufferCount += 1
+        if tapBufferCount <= 3 || tapBufferCount % 500 == 0 {
+            SpeechService.diag("longform sys-audio #\(tapBufferCount) level=\(level) frames=\(buffer.frameLength)")
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastLevelDispatchAt) >= 0.02 {
+            lastLevelDispatchAt = now
+            DispatchQueue.main.async { [weak self] in self?.onLevel?(level) }
+        }
+
+        guard let builder else { return }
+        if let converter, let analyzerFormat {
+            let ratio = analyzerFormat.sampleRate / buffer.format.sampleRate
+            let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up) + 16)
+            guard let converted = AVAudioPCMBuffer(pcmFormat: analyzerFormat, frameCapacity: capacity) else { return }
+            var fed = false
+            var convError: NSError?
+            converter.convert(to: converted, error: &convError) { _, outStatus in
+                if fed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                fed = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            if convError == nil, converted.frameLength > 0 {
+                builder.yield(AnalyzerInput(buffer: converted))
+            }
+        } else {
+            builder.yield(AnalyzerInput(buffer: buffer))
+        }
+    }
+
     private func stopEngine() {
         if let engine = audioEngine {
             if engine.isRunning {
@@ -330,9 +469,15 @@ final class LongFormTranscriber {
         }
         audioEngine = nil
         stateLock.lock()
+        let stream = scStream
+        scStream = nil
+        scOutput = nil
         let file = backupFile
         backupFile = nil
         stateLock.unlock()
+        if let stream {
+            Task { try? await stream.stopCapture() }
+        }
         // Release the file on the backup queue, after any in-flight write.
         if let file { backupQueue.async { _ = file } }
     }
@@ -387,5 +532,29 @@ final class LongFormTranscriber {
         }
         let rms = sqrt(sum / Float(frames))
         return min(1.0, max(0.0, rms * 12.0))
+    }
+}
+
+/// SCStreamOutput adapter turning audio sample buffers into AVAudioPCMBuffers.
+private final class SystemAudioOutput: NSObject, SCStreamOutput {
+    private let handler: (AVAudioPCMBuffer) -> Void
+
+    init(handler: @escaping (AVAudioPCMBuffer) -> Void) {
+        self.handler = handler
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio,
+              let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description),
+              let format = AVAudioFormat(streamDescription: asbd) else { return }
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0,
+              let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
+        pcm.frameLength = AVAudioFrameCount(frames)
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: pcm.mutableAudioBufferList)
+        guard status == noErr else { return }
+        handler(pcm)
     }
 }

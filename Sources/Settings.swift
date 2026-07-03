@@ -56,6 +56,7 @@ final class Settings {
         static let meetingNotes = "meetingNotesEnabled"
         static let interpreterTarget = "interpreterTargetLanguage"
         static let liveTranslation = "liveTranslationEnabled"
+        static let audioSource = "lockedAudioSource"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -172,6 +173,14 @@ final class Settings {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-5.4-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    /// Where locked (long-form) sessions capture audio from: the microphone,
+    /// or the computer's own output (system audio via ScreenCaptureKit — for
+    /// interpreting calls/videos; requires Screen Recording permission).
+    var lockedAudioSourceIsSystem: Bool {
+        get { defaults.string(forKey: Keys.audioSource) == "system" }
+        set { defaults.set(newValue ? "system" : "mic", forKey: Keys.audioSource) }
     }
 
     /// When on, locked (long-form) sessions run as one-way interpretation:

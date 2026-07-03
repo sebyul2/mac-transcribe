@@ -113,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // Language submenu.
-        let langItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
+        let langItem = NSMenuItem(title: "Recognition Language", action: nil, keyEquivalent: "")
         let langMenu = NSMenu()
         for lang in RecognitionLanguage.allCases {
             let item = NSMenuItem(title: lang.displayName, action: #selector(selectLanguage(_:)), keyEquivalent: "")
@@ -198,6 +198,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         interpLangItem.submenu = interpLangMenu
         menu.addItem(interpLangItem)
+
+        // Where locked sessions listen: the microphone, or what the computer
+        // itself is playing (calls, videos) via ScreenCaptureKit.
+        let sourceItem = NSMenuItem(title: "Audio Source", action: nil, keyEquivalent: "")
+        let sourceMenu = NSMenu()
+        let micItem = NSMenuItem(title: "Microphone", action: #selector(selectAudioSourceMic), keyEquivalent: "")
+        micItem.target = self
+        micItem.state = settings.lockedAudioSourceIsSystem ? .off : .on
+        sourceMenu.addItem(micItem)
+        let sysItem = NSMenuItem(title: "System Audio (what the Mac plays)", action: #selector(selectAudioSourceSystem), keyEquivalent: "")
+        sysItem.target = self
+        sysItem.state = settings.lockedAudioSourceIsSystem ? .on : .off
+        sourceMenu.addItem(sysItem)
+        sourceItem.submenu = sourceMenu
+        menu.addItem(sourceItem)
 
         menu.addItem(.separator())
 
@@ -326,6 +341,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.subtitles.update(fullText: display)
         }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
+        longForm.onStatus = { [weak self] status in
+            self?.transcriptWindow.setStatus(status)
+            self?.subtitles.flashStatus(status)
+        }
         transcriptWindow.onStopRequested = { [weak self] in self?.stopLockedRecording() }
         // Closing the subtitles hides them for this session only; the recording
         // itself keeps running.
@@ -475,6 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             interpreter.reset()
             interpreter.targetLanguage = settings.interpreterTargetLanguage
         }
+        longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
         NSLog("MacWhisper[App]: locked recording started mode=\(mode)")
         // Tear down the short push-to-talk session left over from the
         // double-tap's first tap; the locked session uses the long-form engine.
@@ -847,6 +867,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openTranscriptWindow() {
         transcriptWindow.showWindow()
+    }
+
+    @objc private func selectAudioSourceMic() {
+        settings.lockedAudioSourceIsSystem = false
+        rebuildMenu()
+    }
+
+    @objc private func selectAudioSourceSystem() {
+        settings.lockedAudioSourceIsSystem = true
+        rebuildMenu()
     }
 
     @objc private func toggleLiveTranslation() {
