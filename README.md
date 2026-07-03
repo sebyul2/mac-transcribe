@@ -4,7 +4,7 @@ A macOS menu-bar app for voice: hold a key to dictate into any app, record long 
 
 Requires **macOS 26** (Tahoe) or later.
 
-[**Download MacWhisper.dmg**](https://github.com/aisteri/mac-whisper/raw/main/build/MacWhisper.dmg)
+[**Download MacWhisper.dmg**](https://github.com/sebyul2/mac-transcribe/raw/main/build/MacWhisper.dmg)
 
 ## What it does
 
