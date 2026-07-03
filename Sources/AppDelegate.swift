@@ -176,17 +176,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notesItem.image = settings.meetingNotesEnabled ? menuIcon("checkmark") : nil
         menu.addItem(notesItem)
 
-        // One-way simultaneous interpretation: a locked session whose captions
-        // show the live translation; only the raw conversation is saved.
-        let interpTitle = (isLockedRecording && lockMode == .interpreter)
-            ? "Stop Interpreter & Save"
-            : "Start Interpreter Mode"
-        let interpItem = NSMenuItem(title: interpTitle, action: #selector(toggleInterpreterMode), keyEquivalent: "")
+        // One-way simultaneous interpretation: when on, locked sessions show
+        // live-translated captions; only the raw conversation is saved.
+        let interpItem = NSMenuItem(title: "Live Translation", action: #selector(toggleLiveTranslation), keyEquivalent: "")
         interpItem.target = self
-        interpItem.image = menuIcon(isLockedRecording && lockMode == .interpreter ? "stop.circle" : "globe")
+        interpItem.image = settings.liveTranslationEnabled ? menuIcon("checkmark") : nil
         menu.addItem(interpItem)
 
-        let interpLangItem = NSMenuItem(title: "Interpreter Language", action: nil, keyEquivalent: "")
+        let interpLangItem = NSMenuItem(title: "Translation Language", action: nil, keyEquivalent: "")
         let interpLangMenu = NSMenu()
         let targets: [(display: String, prompt: String)] = [
             ("English", "English"), ("한국어", "Korean"),
@@ -468,8 +465,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Locked (hands-free) recording
 
-    private func startLockedRecording(mode: LockMode = .meeting) {
+    private func startLockedRecording() {
         guard !isLockedRecording else { return }
+        // The Live Translation toggle decides what this session is for.
+        let mode: LockMode = (settings.liveTranslationEnabled && settings.llmConfigured)
+            ? .interpreter : .meeting
         lockMode = mode
         if mode == .interpreter {
             interpreter.reset()
@@ -849,13 +849,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcriptWindow.showWindow()
     }
 
-    @objc private func toggleInterpreterMode() {
-        if isLockedRecording {
-            if lockMode == .interpreter { stopLockedRecording() }
-            // A meeting session in progress is left alone.
-        } else {
-            startLockedRecording(mode: .interpreter)
+    @objc private func toggleLiveTranslation() {
+        settings.liveTranslationEnabled.toggle()
+        // Translation needs an LLM; open settings when none is configured yet.
+        if settings.liveTranslationEnabled && !settings.llmConfigured {
+            openSettings()
         }
+        rebuildMenu()
     }
 
     @objc private func selectInterpreterLanguage(_ sender: NSMenuItem) {

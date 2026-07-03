@@ -55,6 +55,7 @@ final class Settings {
         static let longTriggerKeyMods = "longTriggerKeyModifiers"
         static let meetingNotes = "meetingNotesEnabled"
         static let interpreterTarget = "interpreterTargetLanguage"
+        static let liveTranslation = "liveTranslationEnabled"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -171,6 +172,13 @@ final class Settings {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-5.4-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    /// When on, locked (long-form) sessions run as one-way interpretation:
+    /// captions show the live translation and no minutes are generated.
+    var liveTranslationEnabled: Bool {
+        get { defaults.bool(forKey: Keys.liveTranslation) }
+        set { defaults.set(newValue, forKey: Keys.liveTranslation) }
     }
 
     /// Target language for the one-way interpreter mode (English name, used
