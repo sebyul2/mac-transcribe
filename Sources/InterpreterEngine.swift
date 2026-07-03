@@ -41,6 +41,13 @@ final class InterpreterEngine {
 
     /// Latest LLM translation of the open turn (sourceKey is normalized).
     private var openTranslation: (sourceKey: String, text: String)?
+    /// Live-caption progressive commit: the prefix of the open turn's
+    /// translation that consecutive LLM responses have agreed on, minus a
+    /// two-word safety margin. Grows monotonically, renders white — so the
+    /// translation hardens a few words at a time WHILE the speaker talks,
+    /// instead of waiting for a sentence or turn boundary.
+    private var openCommitted = ""
+    private var lastClosedCount = 0
     private var openSeq = 0
     private var openAppliedSeq = 0
     private var openInFlightCount = 0
@@ -79,6 +86,8 @@ final class InterpreterEngine {
         frozenPending.removeAll()
         draftPending.removeAll()
         openTranslation = nil
+        openCommitted = ""
+        lastClosedCount = 0
         openSeq = 0
         openAppliedSeq = 0
         openInFlightCount = 0
@@ -219,7 +228,8 @@ final class InterpreterEngine {
             }
 
             // Quality pass: one request per closed turn, previous turn as
-            // context, frozen on arrival.
+            // context, frozen on arrival. The inherited draft rides along so
+            // the frozen result stays consistent with what was shown.
             guard !frozenPending.contains(key) else { continue }
             frozenPending.insert(key)
             let previous = index > 0 ? closed[index - 1] : nil
@@ -228,6 +238,7 @@ final class InterpreterEngine {
                 turn,
                 context: previous,
                 contextTranslation: previousTranslation,
+                previousOpenTranslation: drafts[key],
                 onPartial: onDeviceReady ? nil : { [weak self] partial in
                     self?.drafts[key] = partial
                 },
@@ -238,6 +249,16 @@ final class InterpreterEngine {
                     self.frozen[key] = final ?? self.drafts[key] ?? turn
                 }
             )
+        }
+
+        // A turn just closed: the open-turn state belongs to the previous
+        // turn's text and must not leak into the new one.
+        if closed.count != lastClosedCount {
+            lastClosedCount = closed.count
+            openTranslation = nil
+            openCommitted = ""
+            tailTranslation = nil
+            lastRequestedOpenKey = ""
         }
 
         maybeTranslateOpen(open)
@@ -310,9 +331,18 @@ final class InterpreterEngine {
             // is already shown — replacing would make the caption shrink and
             // regrow every round.
             if text.count < previous.count { return }
-            if previous.count > 20 {
-                let common = zip(previous, text).prefix { $0 == $1 }.count
-                if common < previous.count / 2 { return }
+            let common = zip(previous, text).prefix { $0 == $1 }.count
+            if previous.count > 20, common < previous.count / 2 { return }
+            // Progressive commit: what two consecutive responses agree on is
+            // stable enough to harden, minus a two-word margin the next
+            // response may still touch. Monotonic — it never retreats.
+            let agreed = String(text.prefix(common))
+            let words = agreed.split(separator: " ", omittingEmptySubsequences: false)
+            if words.count > 2 {
+                let candidate = words.dropLast(2).joined(separator: " ")
+                if candidate.count > openCommitted.count {
+                    openCommitted = candidate
+                }
             }
         }
         openTranslation = (key, text)
@@ -447,8 +477,55 @@ final class InterpreterEngine {
         displayLines.map { $0.text }.joined(separator: "\n")
     }
 
+    /// Caption runs, styled: line breaks live INSIDE the text (the overlay
+    /// concatenates runs verbatim), which lets the open turn render as one
+    /// line made of a white committed prefix plus a dimmed live remainder —
+    /// the live-caption "hardens a few words at a time" effect.
     var captionPieces: [(text: String, isFinal: Bool)] {
-        Array(displayLines.suffix(Self.captionTurns))
+        let (closed, open) = parseTurns(lastFullText)
+        var runs: [(String, Bool)] = []
+
+        func closedRun(_ turn: String, trailingBreak: Bool) {
+            let key = Self.normalizedKey(turn)
+            let suffix = trailingBreak ? "\n" : ""
+            if let final = frozen[key] {
+                runs.append((final + suffix, true))
+            } else if let draft = drafts[key] {
+                runs.append((draft + suffix, false))
+            }
+        }
+
+        // Live text of the open turn (LLM translation + on-device tail).
+        var live = ""
+        if let open {
+            if let ot = openTranslation,
+               Self.remainderAfterNormalizedPrefix(of: open, key: ot.sourceKey) != nil {
+                live = ot.text
+            }
+            if let t = tailTranslation {
+                live += live.isEmpty ? t.text : " " + t.text
+            }
+        }
+
+        if Self.isSubstantial(live) {
+            // One previous turn for continuity, then the open turn split into
+            // committed (white) + still-moving (dimmed) runs.
+            if let last = closed.last { closedRun(last, trailingBreak: true) }
+            if !openCommitted.isEmpty, live.hasPrefix(openCommitted) {
+                runs.append((openCommitted, true))
+                let rest = String(live.dropFirst(openCommitted.count))
+                if !rest.isEmpty { runs.append((rest, false)) }
+            } else {
+                runs.append((live, false))
+            }
+        } else {
+            // Nothing live — show the newest closed turns.
+            let recent = closed.suffix(Self.captionTurns)
+            for (offset, turn) in recent.enumerated() {
+                closedRun(turn, trailingBreak: offset < recent.count - 1)
+            }
+        }
+        return runs
     }
 
     private func emit() {

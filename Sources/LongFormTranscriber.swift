@@ -340,6 +340,23 @@ final class LongFormTranscriber {
     private static let pauseRunDuration = 0.8
     private static let turnRunDuration = 1.0
 
+    /// Continuous speech (a monologue, dubbed dialogue with no audible gaps)
+    /// can keep one turn open indefinitely — its quality translation never
+    /// runs and the caption stays dimmed forever. Once the finalized part of
+    /// the open turn grows past this (~1-2 sentences), seal it at its LAST
+    /// sentence boundary: a natural break, so translation units stay whole.
+    private let maxOpenTurnChars = 50
+
+    /// Called with stateLock held, after appending finalized text.
+    private func sealOverlongOpenTurnLocked() {
+        let openStart = finalizedText.range(of: "\n\n", options: .backwards)?.upperBound
+            ?? finalizedText.startIndex
+        let open = finalizedText[openStart...]
+        guard open.count >= maxOpenTurnChars else { return }
+        guard let terminator = open.lastIndex(where: { ".?!。？！\n".contains($0) }) else { return }
+        finalizedText.insert(contentsOf: "\n\n", at: finalizedText.index(after: terminator))
+    }
+
     /// Rebuilds a final result's text with newlines at the speech pauses the
     /// recognizer absorbed into run durations. Verified against real anime
     /// audio: a long run of spoken text starts a new utterance (the pause
@@ -394,6 +411,7 @@ final class LongFormTranscriber {
                     piece = String(piece.drop(while: { $0 == "\n" }))
                 }
                 finalizedText += piece
+                sealOverlongOpenTurnLocked()
             }
             volatileText = ""
         } else if text != volatileText {

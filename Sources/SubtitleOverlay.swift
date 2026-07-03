@@ -200,20 +200,18 @@ final class SubtitleOverlay {
         return result
     }
 
-    /// Interpreter-mode captions: one piece per line, newest last. Draft
-    /// translations (on-device / still in flight) render dimmed; the LLM's
-    /// frozen results render white, so the quality pass is visible as a
-    /// gray-to-white promotion.
+    /// Interpreter-mode captions: styled runs concatenated verbatim — line
+    /// breaks arrive inside the run text, so a single line can mix a white
+    /// (committed) prefix with a dimmed still-moving remainder, hardening a
+    /// few words at a time like professional live captions.
     func update(pieces: [(text: String, isFinal: Bool)]) {
         guard armed else { return }
-        let recent = pieces.suffix(maxLines)
-        guard recent.contains(where: { $0.text.contains(where: { $0.isLetter || $0.isNumber }) }) else { return }
+        guard pieces.contains(where: { $0.text.contains(where: { $0.isLetter || $0.isNumber }) }) else { return }
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let styled = NSMutableAttributedString()
-        for (index, piece) in recent.enumerated() {
-            if index > 0 { styled.append(NSAttributedString(string: "\n")) }
+        for piece in pieces {
             styled.append(NSAttributedString(string: piece.text, attributes: [
                 .font: font,
                 .foregroundColor: piece.isFinal ? NSColor.white : NSColor.white.withAlphaComponent(0.55),
