@@ -320,36 +320,49 @@ final class InterpreterEngine {
         )
     }
 
+    private var lastOpenApplyAt = Date.distantPast
+
     private func applyOpenTranslation(key: String, text: String) {
-        // Hard stability guard: if the model ignored the reuse instruction
-        // and rewrote most of what is already on screen, keep the screen —
-        // the frozen pass will deliver the polished version once the turn
-        // closes. (Streamed partials are exempt while shorter than the
-        // previous text; they are still catching up to it.)
+        let now = Date()
         if let previous = openTranslation?.text {
             // A shorter text is a streamed partial still catching up to what
             // is already shown — replacing would make the caption shrink and
             // regrow every round.
             if text.count < previous.count { return }
-            let common = zip(previous, text).prefix { $0 == $1 }.count
-            if previous.count > 20, common < previous.count / 2 { return }
-            // Progressive commit: what two consecutive responses agree on is
-            // stable enough to harden, minus a two-word margin the next
-            // response may still touch. Monotonic — it never retreats.
-            let agreed = String(text.prefix(common))
-            let words = agreed.split(separator: " ", omittingEmptySubsequences: false)
-            if words.count > 2 {
-                let candidate = words.dropLast(2).joined(separator: " ")
-                if candidate.count > openCommitted.count {
-                    openCommitted = candidate
-                }
+            // Progressive commit. Two sources of hardening:
+            // - agreement: what consecutive responses concur on is stable;
+            // - time: anything shown for over a second is committed as-is,
+            //   mistranslation or not — endless polishing reads far worse
+            //   than an imperfect line that stands still.
+            if now.timeIntervalSince(lastOpenApplyAt) >= 1.2 {
+                harden(upTo: previous)
+            } else {
+                let common = zip(previous, text).prefix { $0 == $1 }.count
+                harden(upTo: String(previous.prefix(common)))
             }
+            // Committed text is immutable: a response that would rewrite it
+            // is rejected outright — the screen never moves backwards. The
+            // continuation prompt carries the full previous text, so
+            // compliant responses pass.
+            guard openCommitted.isEmpty || text.hasPrefix(openCommitted) else { return }
         }
         openTranslation = (key, text)
+        lastOpenApplyAt = now
         // The LLM now covers everything the tail draft covered.
         if let t = tailTranslation,
            Self.remainderAfterNormalizedPrefix(of: key, key: Self.normalizedKey(t.source)) != nil {
             tailTranslation = nil
+        }
+    }
+
+    /// Extends the committed (white, immutable) prefix to `textPrefix` minus
+    /// a one-word margin, snapped to a word boundary. Monotonic.
+    private func harden(upTo textPrefix: String) {
+        let words = textPrefix.split(separator: " ", omittingEmptySubsequences: false)
+        guard words.count > 1 else { return }
+        let candidate = words.dropLast(1).joined(separator: " ")
+        if candidate.count > openCommitted.count {
+            openCommitted = candidate
         }
     }
 
