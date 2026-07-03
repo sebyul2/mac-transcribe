@@ -324,24 +324,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Locked (long-form) sessions render into the transcript window — a
         // normal draggable/resizable window — instead of the floating HUD.
-        longForm.onTranscript = { [weak self] text in
+        longForm.onTranscript = { [weak self] text, stableLength in
             guard let self else { return }
             if self.lockMode == .interpreter {
                 // The interpreter renders the display; captions/window show the
                 // translated stream while the autosave keeps the raw original.
-                self.interpreter.feed(text)
+                // Only the finalized (stable) prefix earns LLM translations.
+                self.interpreter.feed(text, stableLength: stableLength)
             } else {
                 self.transcriptWindow.updateTranscript(text)
                 self.subtitles.update(fullText: text)
             }
             self.autosaveLockedTranscript(text)
-        }
-        // Real speaker pauses, detected in the audio itself: the interpreter
-        // cuts sentences and speaker turns here instead of waiting for the
-        // recognizer's (often withheld) punctuation.
-        longForm.onUtteranceBreak = { [weak self] in
-            guard let self, self.lockMode == .interpreter, self.isLockedRecording else { return }
-            self.interpreter.noteUtteranceBreak()
         }
         interpreter.onDisplay = { [weak self] display, caption in
             self?.transcriptWindow.updateTranscript(display)

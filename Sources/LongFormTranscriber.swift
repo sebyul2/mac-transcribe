@@ -18,7 +18,11 @@ final class LongFormTranscriber {
     /// Real-time normalized RMS level in 0...1 for the waveform HUD.
     var onLevel: ((Float) -> Void)?
     /// Full accumulated transcript (finalized + volatile tail), on main.
-    var onTranscript: ((String) -> Void)?
+    /// Full accumulated transcript plus how many leading characters of it are
+    /// finalized (stable). Text beyond that is volatile — the recognizer may
+    /// still rewrite it, so the interpreter only drafts it, never spends a
+    /// quality translation on it.
+    var onTranscript: ((_ text: String, _ stableLength: Int) -> Void)?
     /// Final transcript once the session fully drains, on main. Fires exactly once.
     var onFinished: ((String) -> Void)?
     /// When set, every captured buffer is also written to this file (AAC).
@@ -56,20 +60,21 @@ final class LongFormTranscriber {
     /// "speech happened but transcription failed" when the transcript is empty.
     private(set) var sessionPeakLevel: Float = 0
 
-    /// Fired on the main thread when audio that was flowing goes quiet for
-    /// `utteranceSilenceGap` — i.e. the speaker finished an utterance. The
-    /// interpreter uses this to cut sentences and speaker turns at real pauses
-    /// instead of guessing from punctuation (which the recognizer withholds)
-    /// or text inactivity (which misfires on recognition lag).
-    var onUtteranceBreak: (() -> Void)?
     /// Voice-activity state; touched only on the audio callback thread (mic
     /// tap or the ScreenCaptureKit queue — one source per session).
     private var voiceActive = false
     private var lastVoiceAt = Date.distantPast
     /// Decaying envelope of recent levels; the silence threshold adapts to it
-    /// so dialogue over background music still produces breaks.
+    /// so dialogue over background music still registers.
     private var levelEnvelope: Float = 0
     private let utteranceSilenceGap: TimeInterval = 0.35
+    /// Audio-thread timestamp of the last finalize request (periodic pacing).
+    private var lastFinalizeAt = Date.distantPast
+    /// Force a finalization at least this often while volatile text exists.
+    /// Accurate sentence boundaries (and therefore the interpreter's quality
+    /// translations) only exist in finalized results; left alone the engine
+    /// can sit on a volatile blob for ten seconds or more.
+    private let periodicFinalizeInterval: TimeInterval = 2.5
 
     private func trackVoiceActivity(_ level: Float) {
         // ~20 ms per buffer; 0.995^n halves the envelope in roughly 3 s.
@@ -79,13 +84,45 @@ final class LongFormTranscriber {
         if level >= threshold {
             voiceActive = true
             lastVoiceAt = now
-            return
-        }
-        if voiceActive, now.timeIntervalSince(lastVoiceAt) >= utteranceSilenceGap {
+        } else if voiceActive, now.timeIntervalSince(lastVoiceAt) >= utteranceSilenceGap {
+            // Real speech pause: the utterance is over. Mark the turn and
+            // finalize immediately so its exact boundaries (and the
+            // interpreter's quality pass) arrive right away.
             voiceActive = false
-            SpeechService.diag("longform utterance break (envelope=\(levelEnvelope))")
-            DispatchQueue.main.async { [weak self] in self?.onUtteranceBreak?() }
+            SpeechService.diag("longform silence -> finalize (envelope=\(levelEnvelope))")
+            stateLock.lock()
+            pendingTurnBreak = true
+            stateLock.unlock()
+            lastFinalizeAt = now
+            requestFinalize()
         }
+        if now.timeIntervalSince(lastFinalizeAt) >= periodicFinalizeInterval {
+            lastFinalizeAt = now
+            requestFinalize()
+        }
+    }
+
+    /// Asks the analyzer to finalize everything heard so far. No-op while a
+    /// previous request is in flight or when there is nothing volatile.
+    private var finalizeInFlight = false
+    private func requestFinalize() {
+        stateLock.lock()
+        let analyzer = self.analyzer
+        let shouldRun = !finalizeInFlight && !volatileText.isEmpty && analyzer != nil
+        if shouldRun { finalizeInFlight = true }
+        stateLock.unlock()
+        guard shouldRun, let analyzer else { return }
+        Task { [weak self] in
+            try? await analyzer.finalize(through: nil)
+            self?.clearFinalizeInFlight()
+        }
+    }
+
+    /// Synchronous lock helper (NSLock is unavailable from async contexts).
+    private func clearFinalizeInFlight() {
+        stateLock.lock()
+        finalizeInFlight = false
+        stateLock.unlock()
     }
 
     private var combinedTranscript: String {
@@ -93,6 +130,13 @@ final class LongFormTranscriber {
         defer { stateLock.unlock() }
         if volatileText.isEmpty { return finalizedText }
         return finalizedText + volatileText
+    }
+
+    /// Character count of the finalized (stable) prefix of combinedTranscript.
+    private var stableLength: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return finalizedText.count
     }
 
     /// Session generation. Bumped on every start() so a stale async pipeline —
@@ -251,7 +295,8 @@ final class LongFormTranscriber {
                         ? Self.segmentedFinalText(result)
                         : String(result.text.characters)
                     let combined = self.fold(text: text, isFinal: result.isFinal)
-                    DispatchQueue.main.async { self.onTranscript?(combined) }
+                    let stable = self.stableLength
+                    DispatchQueue.main.async { self.onTranscript?(combined, stable) }
                 }
             } catch {
                 SpeechService.diag("longform results error: \(error)")
@@ -262,32 +307,45 @@ final class LongFormTranscriber {
     }
 
     /// A run whose audio span exceeds this absorbed a speech pause (average
-    /// CJK character runs are ~0.15-0.25 s; word runs a little longer).
-    private static let pauseRunDuration = 0.6
+    /// CJK character runs are ~0.15-0.25 s; word runs a little longer). A
+    /// pause this size separates sentences ("\n"); one over `turnRunDuration`
+    /// separates speaker turns ("\n\n" — the interpreter breaks translation
+    /// context there, but not between one speaker's consecutive sentences).
+    private static let pauseRunDuration = 0.5
+    private static let turnRunDuration = 1.0
+
+    /// Set when a real silence preceded whatever finalizes next; consumed by
+    /// fold() as a leading turn break.
+    private var pendingTurnBreak = false
 
     /// Rebuilds a final result's text with newlines at the speech pauses the
     /// recognizer absorbed into run durations. Verified against real anime
     /// audio: a long run of spoken text starts a new utterance (the pause
     /// precedes the word), while a long punctuation/whitespace run trails one
     /// (the pause follows the mark) — so the break lands before or after
-    /// accordingly.
+    /// accordingly. A long leading run also marks the boundary against the
+    /// PREVIOUS final, which matters now that finalization runs every ~2.5 s.
     private static func segmentedFinalText(_ result: SpeechTranscriber.Result) -> String {
         var out = ""
-        var breakPending = false
+        var pendingBreak: String? = nil
+        func noteBreak(_ duration: Double) {
+            let mark = duration >= turnRunDuration ? "\n\n" : "\n"
+            if pendingBreak != "\n\n" { pendingBreak = mark }
+        }
         for run in result.text.runs {
             let piece = String(result.text[run.range].characters)
             let isSpoken = piece.contains { !$0.isWhitespace && !$0.isPunctuation }
             let duration = run.audioTimeRange.map { $0.end.seconds - $0.start.seconds } ?? 0
-            if duration >= pauseRunDuration, isSpoken, !out.isEmpty {
-                breakPending = true
+            if duration >= pauseRunDuration, isSpoken {
+                noteBreak(duration)
             }
-            if breakPending, isSpoken {
-                out += "\n"
-                breakPending = false
+            if isSpoken, let mark = pendingBreak {
+                out += mark
+                pendingBreak = nil
             }
             out += piece
             if duration >= pauseRunDuration, !isSpoken {
-                breakPending = true
+                noteBreak(duration)
             }
         }
         return out
@@ -299,7 +357,15 @@ final class LongFormTranscriber {
     private func fold(text: String, isFinal: Bool) -> String {
         stateLock.lock()
         if isFinal {
-            finalizedText += text
+            var piece = text
+            if pendingTurnBreak {
+                pendingTurnBreak = false
+                if !piece.hasPrefix("\n") { piece = "\n\n" + piece }
+            }
+            if finalizedText.isEmpty {
+                piece = String(piece.drop(while: { $0 == "\n" }))
+            }
+            finalizedText += piece
             volatileText = ""
         } else {
             volatileText = text

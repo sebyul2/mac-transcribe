@@ -101,6 +101,7 @@ final class InterpreterEngine {
         pending.removeAll()
         draftPending.removeAll()
         lastFullText = ""
+        stableKeys.removeAll()
         tailTranslation = nil
         tailSeq = 0
         tailAppliedSeq = 0
@@ -139,48 +140,38 @@ final class InterpreterEngine {
 
     // MARK: - Inputs
 
-    /// Full accumulated transcript from the recognizer (main thread).
-    /// Newlines in it are utterance boundaries detected from the recognizer's
-    /// audio timestamps (see LongFormTranscriber.fold).
-    func feed(_ fullText: String) {
+    /// Full accumulated transcript from the recognizer (main thread), plus
+    /// how many leading characters are finalized (stable). Single "\n"s are
+    /// sentence pauses, "\n\n"s are speaker-turn pauses — both detected from
+    /// the recognizer's word timing (see LongFormTranscriber).
+    func feed(_ fullText: String, stableLength: Int) {
         lastFullText = fullText
+        // Only sentences that lie entirely inside the finalized prefix get
+        // the LLM quality pass: their boundaries are exact and will never be
+        // re-drawn, so each is translated exactly once. Volatile sentences
+        // (forced cuts included) would be re-segmented on finalization and
+        // translated again — pure duplicate spend.
+        stableKeys = Set(rawSplit(String(fullText.prefix(stableLength))).completed.map(Self.normalizedKey))
         markUtteranceEnds()
         pruneForcedBreaks()
         startTailTimerIfNeeded()
         processTranscript()
     }
 
-    /// Newline = utterance boundary: mark the sentence that closes each turn
-    /// so the log breaks lines there and context never crosses it.
+    /// Normalized keys of sentences inside the finalized transcript prefix.
+    private var stableKeys: Set<String> = []
+
+    /// "\n\n" = speaker-turn boundary: mark the sentence that closes each
+    /// turn so the log breaks lines there and translation context never
+    /// crosses it. Single "\n" sentence pauses do NOT break context — one
+    /// speaker's consecutive sentences still inform each other's translation.
     private func markUtteranceEnds() {
-        let turns = lastFullText.components(separatedBy: "\n")
+        let turns = lastFullText.components(separatedBy: "\n\n")
         guard turns.count > 1 else { return }
         for turn in turns.dropLast() {
             let parts = rawSplit(turn)
             if let last = parts.tail ?? parts.completed.last {
                 utteranceEndKeys.insert(Self.normalizedKey(last))
-            }
-        }
-    }
-
-    /// Voice-activity silence from the audio pipeline: the speaker paused, so
-    /// whatever is in progress ends HERE — cut the tail into a sentence (its
-    /// quality pass fires immediately) and mark the utterance boundary that
-    /// gives the log its line break and stops context from crossing speakers.
-    func noteUtteranceBreak() {
-        let parts = split(lastFullText)
-        if let tail = parts.tail, tail.count >= tailMinLength {
-            let key = Self.normalizedKey(tail)
-            forcedBreaks.append((tail, key))
-            utteranceEndKeys.insert(key)
-            processTranscript()
-        } else if let last = parts.completed.last {
-            // Punctuation already closed the sentence; the pause just marks
-            // the turn boundary.
-            let key = Self.normalizedKey(last)
-            if !utteranceEndKeys.contains(key) {
-                utteranceEndKeys.insert(key)
-                emit()
             }
         }
     }
@@ -212,7 +203,12 @@ final class InterpreterEngine {
             }
 
             // Quality pass: the LLM result replaces the draft and freezes.
-            guard finals[key] == nil, !pending.contains(key) else { continue }
+            // Restricted to stable (finalized) sentences whenever drafts have
+            // another source — volatile boundaries get re-drawn on
+            // finalization and would be paid for twice. Without on-device
+            // translation the LLM must draft volatile sentences too.
+            guard finals[key] == nil, !pending.contains(key),
+                  stableKeys.contains(key) || !onDeviceReady else { continue }
             pending.insert(key)
             let (context, contextTranslation) = promptContext(before: index, in: parts.completed)
             requestLLM(
