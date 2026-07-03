@@ -32,19 +32,29 @@ final class InterpreterEngine {
     private let onDevice = AppleTranslator()
     private var onDeviceReady = false
 
-    /// Tail (in-progress sentence) re-translation state.
+    /// Tail (in-progress sentence) re-translation state. Requests overlap —
+    /// up to `maxTailInFlight` fly concurrently and a sequence number keeps
+    /// only the newest result on screen — so a slow response never blocks the
+    /// next refresh.
     private var tailTranslation: (source: String, text: String)?
-    private var tailInFlight = false
+    private var tailSeq = 0
+    private var tailAppliedSeq = 0
+    private var tailInFlightCount = 0
+    private var lastRequestedTail = ""
     private var lastTailRequestAt = Date.distantPast
+    private let maxTailInFlight = 2
     /// How often the unfinished tail may be re-translated. On-device requests
     /// cost tens of milliseconds, so they can run nearly per-update; LLM round
-    /// trips take ~1 s, so they are spaced out (streamed partials fill the gap).
-    private var tailInterval: TimeInterval { onDeviceReady ? 0.25 : 0.6 }
+    /// trips take ~1 s, so overlapping requests are spaced out a little
+    /// (streamed partials fill the gap).
+    private var tailInterval: TimeInterval { onDeviceReady ? 0.25 : 0.45 }
     /// Don't bother translating a tail shorter than this many characters.
     private let tailMinLength = 4
     /// Fires while a session runs so a tail spoken just before a pause still
     /// gets translated even though no new feed() arrives.
     private var tailTimer: Timer?
+    /// How many preceding sentences ride along as LLM prompt context.
+    private let contextSentences = 2
 
     func reset() {
         gen &+= 1
@@ -52,7 +62,10 @@ final class InterpreterEngine {
         pending.removeAll()
         lastFullText = ""
         tailTranslation = nil
-        tailInFlight = false
+        tailSeq = 0
+        tailAppliedSeq = 0
+        tailInFlightCount = 0
+        lastRequestedTail = ""
         lastTailRequestAt = .distantPast
         tailTimer?.invalidate()
         tailTimer = nil
@@ -88,16 +101,17 @@ final class InterpreterEngine {
         startTailTimerIfNeeded()
 
         let parts = split(fullText)
-        // Translate each newly completed sentence, with its predecessor (and
-        // that predecessor's translation, when known) as context. Streamed
+        // Translate each newly completed sentence, with its preceding
+        // sentences (and their translations, when known) as context. Streamed
         // partials show up immediately and the final result overwrites them.
         for (index, sentence) in parts.completed.enumerated() {
             guard translations[sentence] == nil, !pending.contains(sentence) else { continue }
             pending.insert(sentence)
-            let previous = index > 0 ? parts.completed[index - 1] : nil
+            let (context, contextTranslation) = promptContext(before: index, in: parts.completed)
             requestTranslation(
                 of: sentence,
-                context: previous,
+                context: context,
+                contextTranslation: contextTranslation,
                 onPartial: { [weak self] sentence, partial in
                     self?.translations[sentence] = partial
                 },
@@ -108,6 +122,19 @@ final class InterpreterEngine {
         }
         maybeTranslateTail()
         emit()
+    }
+
+    /// The last few sentences before `index`, joined, plus their joined
+    /// translations (only when every one is already translated — a partial
+    /// pairing would misalign the prompt).
+    private func promptContext(before index: Int, in completed: [String]) -> (String?, String?) {
+        let previous = completed[..<index].suffix(contextSentences)
+        guard !previous.isEmpty else { return (nil, nil) }
+        let translated = previous.compactMap { translations[$0] }
+        return (
+            previous.joined(separator: " "),
+            translated.count == previous.count ? translated.joined(separator: " ") : nil
+        )
     }
 
     // MARK: - Tail re-translation
@@ -124,25 +151,36 @@ final class InterpreterEngine {
     private func maybeTranslateTail() {
         let parts = split(lastFullText)
         guard let tail = parts.tail, tail.count >= tailMinLength else { return }
-        guard !tailInFlight else { return }
-        guard tailTranslation?.source != tail else { return }
+        guard tailInFlightCount < maxTailInFlight else { return }
+        guard lastRequestedTail != tail, tailTranslation?.source != tail else { return }
         guard Date().timeIntervalSince(lastTailRequestAt) >= tailInterval else { return }
 
-        tailInFlight = true
+        tailSeq += 1
+        let seq = tailSeq
+        tailInFlightCount += 1
+        lastRequestedTail = tail
         lastTailRequestAt = Date()
-        let context = parts.completed.last
+        let (context, contextTranslation) = promptContext(before: parts.completed.count, in: parts.completed)
         let myGen = gen
         requestTranslation(
             of: tail,
             context: context,
+            contextTranslation: contextTranslation,
             isFragment: true,
             onPartial: { [weak self] source, partial in
-                self?.tailTranslation = (source, partial)
+                guard let self, seq >= self.tailAppliedSeq else { return }
+                self.tailAppliedSeq = seq
+                self.tailTranslation = (source, partial)
             },
             apply: { [weak self] source, translated in
                 guard let self, myGen == self.gen else { return }
-                self.tailInFlight = false
-                self.tailTranslation = (source, translated)
+                self.tailInFlightCount -= 1
+                // Overlapping requests may complete out of order; an older
+                // response must never replace a newer tail on screen.
+                if seq >= self.tailAppliedSeq {
+                    self.tailAppliedSeq = seq
+                    self.tailTranslation = (source, translated)
+                }
                 // The tail may have grown while this was in flight; check again.
                 self.maybeTranslateTail()
             }
@@ -155,6 +193,7 @@ final class InterpreterEngine {
     private func requestTranslation(
         of text: String,
         context: String?,
+        contextTranslation: String?,
         isFragment: Bool = false,
         onPartial: ((String, String) -> Void)? = nil,
         apply: @escaping (String, String) -> Void
@@ -179,7 +218,6 @@ final class InterpreterEngine {
             return
         }
 
-        let contextTranslation = context.flatMap { translations[$0] }
         LLMRefiner.translate(
             text,
             to: targetLanguage,

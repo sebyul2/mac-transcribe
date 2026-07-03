@@ -133,6 +133,14 @@ enum LLMRefiner {
         )
     }
 
+    /// Pre-flights the translation path when an interpreter session starts:
+    /// a throwaway request refreshes the OAuth token, loads the Codex
+    /// instructions cache, and opens the shared HTTP/2 connection — so the
+    /// first real sentence doesn't pay for any of it.
+    static func warmUpTranslation(to language: String) {
+        translate("Hello.", to: language) { _ in }
+    }
+
     /// Fast sentence translation for the interpreter mode. Deliberately
     /// lightweight — no glossary, tiny prompt, zero reasoning effort — because
     /// latency matters more than polish here. The immediately preceding
@@ -480,22 +488,39 @@ enum LLMRefiner {
     }
 }
 
-/// Streams a Responses-API SSE request, delivering the accumulated output text
+/// Streams Responses-API SSE requests, delivering the accumulated output text
 /// after each delta so interpreter captions can render words as they arrive
 /// (~0.8 s to first word) instead of waiting for the full response (~2 s).
-/// Owns its URLSession, whose strong delegate reference keeps the instance
-/// alive until `didCompleteWithError` invalidates it. All callbacks fire on
-/// the session's background delegate queue.
+///
+/// A single shared URLSession carries every stream so consecutive requests
+/// reuse the same HTTP/2 connection — a fresh session per request was paying
+/// a TLS handshake (100–300 ms) on top of each translation. Per-task state
+/// lives in `states`, touched only on the session's serial delegate queue.
 private final class SSEStreamer: NSObject, URLSessionDataDelegate {
-    private var session: URLSession!
-    private var buffer = Data()
-    private var deltas = ""
-    private var finalText: String?
-    private var statusCode = 0
-    private var errorBody = Data()
-    private let original: String
-    private let onPartial: (String) -> Void
-    private let completion: (Result<String, Error>) -> Void
+    private final class State {
+        var buffer = Data()
+        var deltas = ""
+        var finalText: String?
+        var statusCode = 0
+        var errorBody = Data()
+        let original: String
+        let onPartial: (String) -> Void
+        let completion: (Result<String, Error>) -> Void
+
+        init(original: String, onPartial: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
+            self.original = original
+            self.onPartial = onPartial
+            self.completion = completion
+        }
+    }
+
+    private static let shared = SSEStreamer()
+    private var states: [Int: State] = [:]
+    private lazy var session: URLSession = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        return URLSession(configuration: .default, delegate: self, delegateQueue: queue)
+    }()
 
     static func run(
         _ request: URLRequest,
@@ -503,19 +528,17 @@ private final class SSEStreamer: NSObject, URLSessionDataDelegate {
         onPartial: @escaping (String) -> Void,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
-        let streamer = SSEStreamer(original: original, onPartial: onPartial, completion: completion)
-        streamer.session = URLSession(configuration: .default, delegate: streamer, delegateQueue: nil)
-        streamer.session.dataTask(with: request).resume()
+        shared.start(request, state: State(original: original, onPartial: onPartial, completion: completion))
     }
 
-    private init(
-        original: String,
-        onPartial: @escaping (String) -> Void,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        self.original = original
-        self.onPartial = onPartial
-        self.completion = completion
+    private func start(_ request: URLRequest, state: State) {
+        let task = session.dataTask(with: request)
+        // Register on the delegate queue so the entry is in place before the
+        // task's first delegate callback (same serial queue) can run.
+        session.delegateQueue.addOperation { [weak self] in
+            self?.states[task.taskIdentifier] = state
+        }
+        task.resume()
     }
 
     func urlSession(
@@ -524,24 +547,25 @@ private final class SSEStreamer: NSObject, URLSessionDataDelegate {
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        states[dataTask.taskIdentifier]?.statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard (200..<300).contains(statusCode) else {
-            errorBody.append(data)
+        guard let state = states[dataTask.taskIdentifier] else { return }
+        guard (200..<300).contains(state.statusCode) else {
+            state.errorBody.append(data)
             return
         }
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = String(data: buffer[buffer.startIndex..<newline], encoding: .utf8) ?? ""
-            buffer.removeSubrange(buffer.startIndex...newline)
-            handle(line: line.trimmingCharacters(in: .whitespaces))
+        state.buffer.append(data)
+        while let newline = state.buffer.firstIndex(of: 0x0A) {
+            let line = String(data: state.buffer[state.buffer.startIndex..<newline], encoding: .utf8) ?? ""
+            state.buffer.removeSubrange(state.buffer.startIndex...newline)
+            handle(line: line.trimmingCharacters(in: .whitespaces), state: state)
         }
     }
 
-    private func handle(line: String) {
+    private func handle(line: String, state: State) {
         guard line.hasPrefix("data: ") else { return }
         let payload = line.dropFirst(6)
         guard payload != "[DONE]",
@@ -550,8 +574,8 @@ private final class SSEStreamer: NSObject, URLSessionDataDelegate {
         switch type {
         case "response.output_text.delta":
             if let delta = obj["delta"] as? String {
-                deltas += delta
-                onPartial(deltas)
+                state.deltas += delta
+                state.onPartial(state.deltas)
             }
         case "response.completed", "response.done":
             guard let resp = obj["response"] as? [String: Any],
@@ -563,24 +587,24 @@ private final class SSEStreamer: NSObject, URLSessionDataDelegate {
                     if let text = part["text"] as? String { texts.append(text) }
                 }
             }
-            if !texts.isEmpty { finalText = texts.joined() }
+            if !texts.isEmpty { state.finalText = texts.joined() }
         default:
             break
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        defer { session.finishTasksAndInvalidate() }
+        guard let state = states.removeValue(forKey: task.taskIdentifier) else { return }
         if let error {
-            completion(.failure(error))
+            state.completion(.failure(error))
             return
         }
-        guard (200..<300).contains(statusCode) else {
-            let detail = String(data: errorBody, encoding: .utf8) ?? ""
-            completion(.failure(LLMRefiner.RefineError(message: "HTTP \(statusCode): \(detail)")))
+        guard (200..<300).contains(state.statusCode) else {
+            let detail = String(data: state.errorBody, encoding: .utf8) ?? ""
+            state.completion(.failure(LLMRefiner.RefineError(message: "HTTP \(state.statusCode): \(detail)")))
             return
         }
-        let content = (finalText ?? deltas).trimmingCharacters(in: .whitespacesAndNewlines)
-        completion(.success(content.isEmpty ? original : content))
+        let content = (state.finalText ?? state.deltas).trimmingCharacters(in: .whitespacesAndNewlines)
+        state.completion(.success(content.isEmpty ? state.original : content))
     }
 }
