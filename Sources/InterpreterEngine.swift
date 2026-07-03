@@ -227,6 +227,17 @@ final class InterpreterEngine {
                 }
             }
 
+            // A turn that has already scrolled out of the caption window is
+            // history — the viewer moved on with the drafted line, and a
+            // polished retranslation of it is wasted spend that competes with
+            // the open turn's latency. Freeze it as shown.
+            if index < closed.count - Self.captionTurns {
+                if !frozenPending.contains(key) {
+                    frozen[key] = drafts[key] ?? turn
+                }
+                continue
+            }
+
             // Quality pass: one request per closed turn, previous turn as
             // context, frozen on arrival. The inherited draft rides along so
             // the frozen result stays consistent with what was shown.
@@ -333,8 +344,9 @@ final class InterpreterEngine {
             // - agreement: what consecutive responses concur on is stable;
             // - time: anything shown for over a second is committed as-is,
             //   mistranslation or not — endless polishing reads far worse
-            //   than an imperfect line that stands still.
-            if now.timeIntervalSince(lastOpenApplyAt) >= 1.2 {
+            //   than an imperfect line that stands still. 0.6 s: the user
+            //   wants captions to harden and move on, quality second.
+            if now.timeIntervalSince(lastOpenApplyAt) >= 0.6 {
                 harden(upTo: previous)
             } else {
                 let common = zip(previous, text).prefix { $0 == $1 }.count
