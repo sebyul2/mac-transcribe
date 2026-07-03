@@ -10,7 +10,10 @@ import ApplicationServices
 final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
 
     private enum Permission: Int, CaseIterable {
-        case microphone, speech, inputMonitoring, accessibility
+        case microphone, speech, inputMonitoring, accessibility, screenRecording
+
+        /// Screen Recording is optional — only the System Audio source needs it.
+        var isOptional: Bool { self == .screenRecording }
 
         var title: String {
             switch self {
@@ -18,6 +21,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             case .speech: return "Speech Recognition"
             case .inputMonitoring: return "Input Monitoring"
             case .accessibility: return "Accessibility"
+            case .screenRecording: return "Screen Recording"
             }
         }
 
@@ -29,6 +33,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 case .speech: return "Transcribe speech to text."
                 case .inputMonitoring: return "Detect the Fn key. Toggle Mac Whisper on in the list."
                 case .accessibility: return "Insert text into other apps. Toggle Mac Whisper on in the list."
+                case .screenRecording: return "Capture system audio (what the Mac plays). Optional — only for the System Audio source."
                 }
             case .korean:
                 switch self {
@@ -36,6 +41,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 case .speech: return "음성을 텍스트로 변환합니다."
                 case .inputMonitoring: return "Fn 키 입력을 감지합니다. 목록에서 Mac Whisper를 켜주세요."
                 case .accessibility: return "다른 앱에 텍스트를 입력합니다. 목록에서 Mac Whisper를 켜주세요."
+                case .screenRecording: return "시스템 오디오(맥이 재생하는 소리)를 캡처합니다. System Audio 입력을 쓸 때만 필요한 선택 권한입니다."
                 }
             case .simplifiedChinese:
                 switch self {
@@ -43,6 +49,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 case .speech: return "将语音转换为文本。"
                 case .inputMonitoring: return "检测 Fn 键。在列表中打开 Mac Whisper 的开关。"
                 case .accessibility: return "将文本插入其他应用。在列表中打开 Mac Whisper 的开关。"
+                case .screenRecording: return "捕获系统音频（Mac 播放的声音）。可选 — 仅在使用系统音频输入时需要。"
                 }
             case .traditionalChinese:
                 switch self {
@@ -50,6 +57,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 case .speech: return "將語音轉換為文字。"
                 case .inputMonitoring: return "偵測 Fn 鍵。在列表中開啟 Mac Whisper。"
                 case .accessibility: return "將文字插入其他應用程式。在列表中開啟 Mac Whisper。"
+                case .screenRecording: return "擷取系統音訊（Mac 播放的聲音）。可選 — 僅在使用系統音訊輸入時需要。"
                 }
             case .japanese:
                 switch self {
@@ -57,6 +65,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 case .speech: return "音声をテキストに変換します。"
                 case .inputMonitoring: return "Fn キーを検出します。リストで Mac Whisper をオンにしてください。"
                 case .accessibility: return "他のアプリにテキストを入力します。リストで Mac Whisper をオンにしてください。"
+                case .screenRecording: return "システムオーディオ（Mac が再生する音）をキャプチャします。System Audio 入力を使う場合のみ必要なオプション権限です。"
                 }
             }
         }
@@ -67,6 +76,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             case .speech: return SFSpeechRecognizer.authorizationStatus() == .authorized
             case .inputMonitoring: return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
             case .accessibility: return AXIsProcessTrusted()
+            case .screenRecording: return CGPreflightScreenCaptureAccess()
             }
         }
 
@@ -77,6 +87,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             case .speech: return base + "Privacy_SpeechRecognition"
             case .inputMonitoring: return base + "Privacy_ListenEvent"
             case .accessibility: return base + "Privacy_Accessibility"
+            case .screenRecording: return base + "Privacy_ScreenCapture"
             }
         }
 
@@ -92,6 +103,10 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 if !isGranted {
                     let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                     _ = AXIsProcessTrustedWithOptions(options)
+                }
+            case .screenRecording:
+                if !isGranted {
+                    CGRequestScreenCaptureAccess()
                 }
             }
         }
@@ -113,7 +128,9 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
     /// monitor so the Fn key starts working immediately.
     var onInputMonitoringGranted: (() -> Void)?
 
-    static var allGranted: Bool { Permission.allCases.allSatisfy { $0.isGranted } }
+    static var allGranted: Bool {
+        Permission.allCases.filter { !$0.isOptional }.allSatisfy { $0.isGranted }
+    }
 
     /// Header shown at the top of the window: a purpose line plus a reassurance
     /// line, in the user's selected language. When everything is granted, a
@@ -144,7 +161,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 390),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 448),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -160,7 +177,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         guard let content = window?.contentView else { return }
 
         let header = NSTextField(wrappingLabelWithString: "")
-        header.frame = NSRect(x: 20, y: 320, width: 600, height: 46)
+        header.frame = NSRect(x: 20, y: 378, width: 600, height: 46)
         header.maximumNumberOfLines = 2
         header.lineBreakMode = .byWordWrapping
         header.isEditable = false
@@ -171,7 +188,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         content.addSubview(header)
         headerLabel = header
 
-        var y: CGFloat = 270
+        var y: CGFloat = 328
         for permission in Permission.allCases {
             let name = NSTextField(labelWithString: permission.title)
             name.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -227,6 +244,9 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             if isGranted {
                 label.stringValue = "✓ Granted"
                 label.textColor = .systemGreen
+            } else if permission.isOptional {
+                label.stringValue = "Optional"
+                label.textColor = .secondaryLabelColor
             } else {
                 label.stringValue = "Not granted"
                 label.textColor = .systemRed
@@ -270,6 +290,8 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         case .inputMonitoring:
             openSettingsAfterRegistering(permission)
         case .accessibility:
+            openSettingsAfterRegistering(permission)
+        case .screenRecording:
             openSettingsAfterRegistering(permission)
         }
     }
