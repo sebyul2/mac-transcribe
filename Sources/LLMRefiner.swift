@@ -73,6 +73,13 @@ enum LLMRefiner {
         how it landed. When in doubt whether a point is substantive, include it. Leave \
         out only filler, small talk, and verbatim repetition.
 
+        Use visual aids where they genuinely clarify: when the discussion describes a \
+        process or workflow, a system structure, a decision tree, a sequence of \
+        interactions, or a timeline/plan, render it as a Mermaid diagram in a \
+        ```mermaid code block (flowchart, sequenceDiagram, timeline, …) alongside the \
+        prose; use Markdown tables for comparisons and option matrices. Only diagram \
+        what was actually discussed — never decorate for its own sake.
+
         Rules:
         1. The transcript comes from speech recognition and contains mis-recognized \
         words; silently correct them from context. Never invent content — attendees, \
