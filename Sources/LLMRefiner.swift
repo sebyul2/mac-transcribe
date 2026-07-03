@@ -134,16 +134,20 @@ enum LLMRefiner {
     }
 
     /// Fast sentence translation for the interpreter mode. Deliberately
-    /// lightweight — no glossary, tiny prompt, low reasoning effort — because
+    /// lightweight — no glossary, tiny prompt, zero reasoning effort — because
     /// latency matters more than polish here. The immediately preceding
     /// sentence (and its translation, when known) is passed as context so
     /// pronouns and terminology stay consistent across sentences.
+    /// `onPartial` (ChatGPT protocol only) delivers the accumulated output as
+    /// SSE deltas arrive, so captions can render the translation as it streams
+    /// instead of waiting ~1 s for completion. Called on a background queue.
     static func translate(
         _ text: String,
         to language: String,
         context: String? = nil,
         contextTranslation: String? = nil,
         isFragment: Bool = false,
+        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let settings = Settings.shared
@@ -167,6 +171,8 @@ enum LLMRefiner {
             model: settings.llmModel,
             proto: settings.llmProtocol,
             systemPrompt: prompt,
+            reasoningEffort: "none",
+            onPartial: onPartial,
             completion: completion
         )
     }
@@ -180,6 +186,7 @@ enum LLMRefiner {
         proto: LLMProtocol = .openai,
         systemPrompt: String? = nil,
         reasoningEffort: String = "low",
+        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let prompt = systemPrompt ?? self.systemPrompt
@@ -189,7 +196,7 @@ enum LLMRefiner {
         case .anthropic:
             requestAnthropic(text: text, baseURL: baseURL, apiKey: apiKey, model: model, systemPrompt: prompt, completion: completion)
         case .chatgpt:
-            requestChatGPT(text: text, model: model, systemPrompt: prompt, reasoningEffort: reasoningEffort, completion: completion)
+            requestChatGPT(text: text, model: model, systemPrompt: prompt, reasoningEffort: reasoningEffort, onPartial: onPartial, completion: completion)
         }
     }
 
@@ -204,6 +211,7 @@ enum LLMRefiner {
         model: String,
         systemPrompt: String,
         reasoningEffort: String,
+        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         ChatGPTOAuth.shared.withFreshToken { tokenResult in
@@ -219,6 +227,7 @@ enum LLMRefiner {
                     sendChatGPT(text: text, model: model, instructions: instructions,
                                 systemPrompt: systemPrompt, reasoningEffort: reasoningEffort,
                                 access: token.access, accountID: token.accountID,
+                                onPartial: onPartial,
                                 completion: completion)
                 }
             }
@@ -233,6 +242,7 @@ enum LLMRefiner {
         reasoningEffort: String,
         access: String,
         accountID: String,
+        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let url = URL(string: "https://chatgpt.com/backend-api/codex/responses")!
@@ -268,9 +278,15 @@ enum LLMRefiner {
             return
         }
 
-        send(req, original: text) { data in
-            parseSSEOutputText(data)
-        } completion: { completion($0) }
+        if let onPartial {
+            // Incremental delivery: the streamer retains itself through its
+            // URLSession delegate reference until the request finishes.
+            SSEStreamer.run(req, original: text, onPartial: onPartial, completion: completion)
+        } else {
+            send(req, original: text) { data in
+                parseSSEOutputText(data)
+            } completion: { completion($0) }
+        }
     }
 
     /// Extracts the assistant's final text from a Responses-API SSE stream.
@@ -461,5 +477,110 @@ enum LLMRefiner {
         default:
             return nil
         }
+    }
+}
+
+/// Streams a Responses-API SSE request, delivering the accumulated output text
+/// after each delta so interpreter captions can render words as they arrive
+/// (~0.8 s to first word) instead of waiting for the full response (~2 s).
+/// Owns its URLSession, whose strong delegate reference keeps the instance
+/// alive until `didCompleteWithError` invalidates it. All callbacks fire on
+/// the session's background delegate queue.
+private final class SSEStreamer: NSObject, URLSessionDataDelegate {
+    private var session: URLSession!
+    private var buffer = Data()
+    private var deltas = ""
+    private var finalText: String?
+    private var statusCode = 0
+    private var errorBody = Data()
+    private let original: String
+    private let onPartial: (String) -> Void
+    private let completion: (Result<String, Error>) -> Void
+
+    static func run(
+        _ request: URLRequest,
+        original: String,
+        onPartial: @escaping (String) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        let streamer = SSEStreamer(original: original, onPartial: onPartial, completion: completion)
+        streamer.session = URLSession(configuration: .default, delegate: streamer, delegateQueue: nil)
+        streamer.session.dataTask(with: request).resume()
+    }
+
+    private init(
+        original: String,
+        onPartial: @escaping (String) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        self.original = original
+        self.onPartial = onPartial
+        self.completion = completion
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard (200..<300).contains(statusCode) else {
+            errorBody.append(data)
+            return
+        }
+        buffer.append(data)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = String(data: buffer[buffer.startIndex..<newline], encoding: .utf8) ?? ""
+            buffer.removeSubrange(buffer.startIndex...newline)
+            handle(line: line.trimmingCharacters(in: .whitespaces))
+        }
+    }
+
+    private func handle(line: String) {
+        guard line.hasPrefix("data: ") else { return }
+        let payload = line.dropFirst(6)
+        guard payload != "[DONE]",
+              let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+        switch type {
+        case "response.output_text.delta":
+            if let delta = obj["delta"] as? String {
+                deltas += delta
+                onPartial(deltas)
+            }
+        case "response.completed", "response.done":
+            guard let resp = obj["response"] as? [String: Any],
+                  let output = resp["output"] as? [[String: Any]] else { return }
+            var texts: [String] = []
+            for item in output where (item["type"] as? String) == "message" {
+                for part in (item["content"] as? [[String: Any]] ?? [])
+                where (part["type"] as? String) == "output_text" {
+                    if let text = part["text"] as? String { texts.append(text) }
+                }
+            }
+            if !texts.isEmpty { finalText = texts.joined() }
+        default:
+            break
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer { session.finishTasksAndInvalidate() }
+        if let error {
+            completion(.failure(error))
+            return
+        }
+        guard (200..<300).contains(statusCode) else {
+            let detail = String(data: errorBody, encoding: .utf8) ?? ""
+            completion(.failure(LLMRefiner.RefineError(message: "HTTP \(statusCode): \(detail)")))
+            return
+        }
+        let content = (finalText ?? deltas).trimmingCharacters(in: .whitespacesAndNewlines)
+        completion(.success(content.isEmpty ? original : content))
     }
 }
