@@ -133,15 +133,35 @@ final class LongFormTranscriber {
     }
 
     /// Synchronous lock helper (NSLock is unavailable from async contexts).
+    /// The analyzer's finalize() can return BEFORE its final result reaches
+    /// the results stream, so sealing retries briefly instead of giving up —
+    /// a skipped seal left the just-finished utterance open until the next
+    /// speaker started, which is exactly when its translation used to stall.
     private func finishFinalize(sealTurn: Bool) {
         stateLock.lock()
         finalizeInFlight = false
+        stateLock.unlock()
+        guard sealTurn else { return }
+        Task { [weak self] in
+            for _ in 0..<10 {
+                if self?.trySealTurn() != false { return }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+    }
+
+    /// Appends the turn boundary once the finalize has drained. Returns true
+    /// when sealed (or there is nothing to seal), false to retry.
+    private func trySealTurn() -> Bool {
+        stateLock.lock()
         var emit = false
-        // Seal only when the finalize actually drained (no volatile left) and
-        // there is a turn to close.
-        if sealTurn, volatileText.isEmpty, !finalizedText.isEmpty, !finalizedText.hasSuffix("\n\n") {
-            finalizedText += "\n\n"
-            emit = true
+        var done = false
+        if volatileText.isEmpty {
+            if !finalizedText.isEmpty, !finalizedText.hasSuffix("\n\n") {
+                finalizedText += "\n\n"
+                emit = true
+            }
+            done = true
         }
         stateLock.unlock()
         if emit {
@@ -149,6 +169,7 @@ final class LongFormTranscriber {
             let stable = stableLength
             DispatchQueue.main.async { [weak self] in self?.onTranscript?(combined, stable) }
         }
+        return done
     }
 
     private var combinedTranscript: String {
