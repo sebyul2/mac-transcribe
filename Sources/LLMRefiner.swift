@@ -213,7 +213,7 @@ enum LLMRefiner {
         let prompt = systemPrompt ?? self.systemPrompt
         switch proto {
         case .openai:
-            requestOpenAI(text: text, baseURL: baseURL, apiKey: apiKey, model: model, systemPrompt: prompt, completion: completion)
+            requestOpenAI(text: text, baseURL: baseURL, apiKey: apiKey, model: model, systemPrompt: prompt, reasoningEffort: reasoningEffort, completion: completion)
         case .anthropic:
             requestAnthropic(text: text, baseURL: baseURL, apiKey: apiKey, model: model, systemPrompt: prompt, completion: completion)
         case .chatgpt:
@@ -352,6 +352,7 @@ enum LLMRefiner {
         apiKey: String,
         model: String,
         systemPrompt: String,
+        reasoningEffort: String = "low",
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         guard let url = endpoint(from: baseURL, suffix: "chat/completions") else {
@@ -359,7 +360,7 @@ enum LLMRefiner {
             return
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "temperature": 0,
             "messages": [
@@ -367,6 +368,13 @@ enum LLMRefiner {
                 ["role": "user", "content": text]
             ]
         ]
+        // Reasoning models burn seconds thinking about a one-line translation
+        // unless told not to; measured on gpt-5.4-nano, effort "none" cuts a
+        // 1.9 s response to ~0.7 s. Non-reasoning models reject the field, so
+        // only send it where it applies.
+        if model.hasPrefix("gpt-5") {
+            body["reasoning_effort"] = reasoningEffort
+        }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"

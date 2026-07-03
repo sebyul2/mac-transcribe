@@ -227,10 +227,26 @@ final class InterpreterEngine {
                 }
             }
 
-            // A turn that has already scrolled out of the caption window is
-            // history — the viewer moved on with the drafted line, and a
-            // polished retranslation of it is wasted spend that competes with
-            // the open turn's latency. Freeze it as shown.
+            // A closed turn is the past — the viewer has moved on, and any
+            // LLM time spent on it competes with the open turn's latency.
+            // With on-device drafts available, freeze closed turns as shown
+            // (or with a fast on-device translation when nothing was
+            // inherited) and reserve the LLM entirely for what is being said
+            // RIGHT NOW. Without on-device support the LLM must still polish
+            // the freshest turns or the display would be source text.
+            if onDeviceReady {
+                if let draft = drafts[key] {
+                    frozen[key] = draft
+                } else if !draftPending.contains(key) {
+                    draftPending.insert(key)
+                    requestOnDevice(turn) { [weak self] draft in
+                        guard let self else { return }
+                        self.draftPending.remove(key)
+                        if self.frozen[key] == nil { self.frozen[key] = draft ?? turn }
+                    }
+                }
+                continue
+            }
             if index < closed.count - Self.captionTurns {
                 if !frozenPending.contains(key) {
                     frozen[key] = drafts[key] ?? turn
