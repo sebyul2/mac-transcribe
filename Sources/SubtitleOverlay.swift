@@ -237,9 +237,10 @@ final class SubtitleOverlay {
         // external monitor is the main one).
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vis = screen.visibleFrame
-        // Cap the caption width like real subtitles — on wide monitors 70% of
-        // the screen let a single line run absurdly long before wrapping.
-        let maxTextWidth = min(vis.width * 0.55, 720) - hPadding * 2
+        // Cap the caption width like real subtitles, but generously — turn
+        // lines are whole utterances now and cramped wrapping (breaking a
+        // Korean sentence before its final particle) reads terribly.
+        let maxTextWidth = min(vis.width * 0.72, 1000) - hPadding * 2
 
         let bounding = (text as NSString).boundingRect(
             with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),

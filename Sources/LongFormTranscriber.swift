@@ -68,13 +68,16 @@ final class LongFormTranscriber {
     /// so dialogue over background music still registers.
     private var levelEnvelope: Float = 0
     private let utteranceSilenceGap: TimeInterval = 0.35
-    /// Audio-thread timestamp of the last finalize request (periodic pacing).
+    /// Audio-thread timestamp of the last finalize request (pacing).
     private var lastFinalizeAt = Date.distantPast
-    /// Force a finalization at least this often while volatile text exists.
-    /// Accurate sentence boundaries (and therefore the interpreter's quality
-    /// translations) only exist in finalized results; left alone the engine
-    /// can sit on a volatile blob for ten seconds or more.
-    private let periodicFinalizeInterval: TimeInterval = 2.5
+    /// Finalization is only ever requested when the recognizer has stopped
+    /// revising: after a real silence (VAD), or when the volatile hypothesis
+    /// has been stable this long. Forcing a finalize MID-utterance (the old
+    /// fixed timer) made the recognizer commit a half-formed hypothesis —
+    /// low-confidence words were dropped or collapsed to "." and sentences
+    /// were cut at arbitrary points, splitting words across translations.
+    private let volatileStableFinalizeAfter: TimeInterval = 2.0
+    private let minFinalizeSpacing: TimeInterval = 1.5
 
     private func trackVoiceActivity(_ level: Float) {
         // ~20 ms per buffer; 0.995^n halves the envelope in roughly 3 s.
@@ -95,8 +98,17 @@ final class LongFormTranscriber {
             stateLock.unlock()
             lastFinalizeAt = now
             requestFinalize()
+            return
         }
-        if now.timeIntervalSince(lastFinalizeAt) >= periodicFinalizeInterval {
+        // Stale-hypothesis finalize: the recognizer hasn't revised its
+        // volatile text for a while, so committing it loses nothing — this
+        // covers sources whose background music defeats the level VAD.
+        guard now.timeIntervalSince(lastFinalizeAt) >= minFinalizeSpacing else { return }
+        stateLock.lock()
+        let volatileStable = !volatileText.isEmpty
+            && now.timeIntervalSince(volatileChangedAt) >= volatileStableFinalizeAfter
+        stateLock.unlock()
+        if volatileStable {
             lastFinalizeAt = now
             requestFinalize()
         }
@@ -311,8 +323,8 @@ final class LongFormTranscriber {
     /// pause this size separates sentences ("\n"); one over `turnRunDuration`
     /// separates speaker turns ("\n\n" — the interpreter breaks translation
     /// context there, but not between one speaker's consecutive sentences).
-    private static let pauseRunDuration = 0.5
-    private static let turnRunDuration = 1.0
+    private static let pauseRunDuration = 0.8
+    private static let turnRunDuration = 1.2
 
     /// Set when a real silence preceded whatever finalizes next; consumed by
     /// fold() as a leading turn break.
@@ -351,24 +363,36 @@ final class LongFormTranscriber {
         return out
     }
 
+    /// When the recognizer last REVISED its volatile hypothesis; a stable
+    /// hypothesis is safe to finalize. Guarded by stateLock.
+    private var volatileChangedAt = Date.distantPast
+
     /// Merges one recognizer result into the accumulated transcript and returns
     /// the combined text. Synchronous so it is safe to call from the async
     /// results loop without touching the lock in an async context.
     private func fold(text: String, isFinal: Bool) -> String {
         stateLock.lock()
         if isFinal {
-            var piece = text
-            if pendingTurnBreak {
-                pendingTurnBreak = false
-                if !piece.hasPrefix("\n") { piece = "\n\n" + piece }
+            // A final with no actual words — a bare "." from a silence or an
+            // ambiguous scrap the recognizer gave up on — is noise; folding it
+            // in litters the transcript (and the interpreter) with dot-only
+            // sentences.
+            let substantial = text.contains { $0.isLetter || $0.isNumber }
+            if substantial {
+                var piece = text
+                if pendingTurnBreak {
+                    pendingTurnBreak = false
+                    if !piece.hasPrefix("\n") { piece = "\n\n" + piece }
+                }
+                if finalizedText.isEmpty {
+                    piece = String(piece.drop(while: { $0 == "\n" }))
+                }
+                finalizedText += piece
             }
-            if finalizedText.isEmpty {
-                piece = String(piece.drop(while: { $0 == "\n" }))
-            }
-            finalizedText += piece
             volatileText = ""
-        } else {
+        } else if text != volatileText {
             volatileText = text
+            volatileChangedAt = Date()
         }
         stateLock.unlock()
         return combinedTranscript
