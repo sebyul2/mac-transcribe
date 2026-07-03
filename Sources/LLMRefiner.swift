@@ -133,6 +133,44 @@ enum LLMRefiner {
         )
     }
 
+    /// Fast sentence translation for the interpreter mode. Deliberately
+    /// lightweight — no glossary, tiny prompt, low reasoning effort — because
+    /// latency matters more than polish here. The immediately preceding
+    /// sentence (and its translation, when known) is passed as context so
+    /// pronouns and terminology stay consistent across sentences.
+    static func translate(
+        _ text: String,
+        to language: String,
+        context: String? = nil,
+        contextTranslation: String? = nil,
+        isFragment: Bool = false,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        let settings = Settings.shared
+        var prompt = """
+        You are a simultaneous interpreter. Translate the user's text into \(language). \
+        Output ONLY the translation — no quotes, no notes, no commentary.
+        """
+        if let context {
+            prompt += "\n\nPreceding source (context only — do NOT include it in the output): \(context)"
+            if let contextTranslation {
+                prompt += "\nIts translation (match its tone and terminology): \(contextTranslation)"
+            }
+        }
+        if isFragment {
+            prompt += "\n\nThe text is an unfinished sentence still being spoken; translate the fragment naturally as-is, without completing it."
+        }
+        request(
+            text: text,
+            baseURL: settings.llmBaseURL,
+            apiKey: settings.llmAPIKey,
+            model: settings.llmModel,
+            proto: settings.llmProtocol,
+            systemPrompt: prompt,
+            completion: completion
+        )
+    }
+
     /// Used by refinement, meeting notes, and the Settings "Test" button.
     static func request(
         text: String,

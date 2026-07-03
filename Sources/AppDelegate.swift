@@ -8,6 +8,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Long-form engine (SpeechAnalyzer) used only for locked recordings, where
     /// long silences are normal and SFSpeechRecognizer's dictation model breaks.
     private let longForm = LongFormTranscriber()
+    /// Live sentence-by-sentence translation for the interpreter mode.
+    private let interpreter = InterpreterEngine()
+
+    /// What a locked session is for: a meeting capture (transcript + optional
+    /// refinement/minutes) or one-way live interpretation (translated captions;
+    /// only the raw conversation is saved — never minutes).
+    private enum LockMode { case meeting, interpreter }
+    private var lockMode: LockMode = .meeting
     private let panel = FloatingPanel()
     private let transcriptWindow = TranscriptWindowController()
     private let subtitles = SubtitleOverlay()
@@ -168,6 +176,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notesItem.image = settings.meetingNotesEnabled ? menuIcon("checkmark") : nil
         menu.addItem(notesItem)
 
+        // One-way simultaneous interpretation: a locked session whose captions
+        // show the live translation; only the raw conversation is saved.
+        let interpTitle = (isLockedRecording && lockMode == .interpreter)
+            ? "Stop Interpreter & Save"
+            : "Start Interpreter Mode"
+        let interpItem = NSMenuItem(title: interpTitle, action: #selector(toggleInterpreterMode), keyEquivalent: "")
+        interpItem.target = self
+        interpItem.image = menuIcon(isLockedRecording && lockMode == .interpreter ? "stop.circle" : "globe")
+        menu.addItem(interpItem)
+
+        let interpLangItem = NSMenuItem(title: "Interpreter Language", action: nil, keyEquivalent: "")
+        let interpLangMenu = NSMenu()
+        let targets: [(display: String, prompt: String)] = [
+            ("English", "English"), ("한국어", "Korean"),
+            ("日本語", "Japanese"), ("简体中文", "Simplified Chinese"),
+        ]
+        for target in targets {
+            let item = NSMenuItem(title: target.display, action: #selector(selectInterpreterLanguage(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = target.prompt
+            item.state = (target.prompt == settings.interpreterTargetLanguage) ? .on : .off
+            interpLangMenu.addItem(item)
+        }
+        interpLangItem.submenu = interpLangMenu
+        menu.addItem(interpLangItem)
+
         menu.addItem(.separator())
 
         // Reflect the locked-recording state in the menu-bar icon so a running
@@ -279,9 +313,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Locked (long-form) sessions render into the transcript window — a
         // normal draggable/resizable window — instead of the floating HUD.
         longForm.onTranscript = { [weak self] text in
-            self?.transcriptWindow.updateTranscript(text)
-            self?.subtitles.update(fullText: text)
-            self?.autosaveLockedTranscript(text)
+            guard let self else { return }
+            if self.lockMode == .interpreter {
+                // The interpreter renders the display; captions/window show the
+                // translated stream while the autosave keeps the raw original.
+                self.interpreter.feed(text)
+            } else {
+                self.transcriptWindow.updateTranscript(text)
+                self.subtitles.update(fullText: text)
+            }
+            self.autosaveLockedTranscript(text)
+        }
+        interpreter.onDisplay = { [weak self] display in
+            self?.transcriptWindow.updateTranscript(display)
+            self?.subtitles.update(fullText: display)
         }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         transcriptWindow.onStopRequested = { [weak self] in self?.stopLockedRecording() }
@@ -423,9 +468,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Locked (hands-free) recording
 
-    private func startLockedRecording() {
+    private func startLockedRecording(mode: LockMode = .meeting) {
         guard !isLockedRecording else { return }
-        NSLog("MacWhisper[App]: locked recording started")
+        lockMode = mode
+        if mode == .interpreter {
+            interpreter.reset()
+            interpreter.targetLanguage = settings.interpreterTargetLanguage
+        }
+        NSLog("MacWhisper[App]: locked recording started mode=\(mode)")
         // Tear down the short push-to-talk session left over from the
         // double-tap's first tap; the locked session uses the long-form engine.
         // cancel() suppresses that session's onFinished on purpose, which also
@@ -460,7 +510,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No floating HUD for locked sessions — the transcript window (opened
         // from the menu) and the menu-bar icon carry the feedback.
         transcriptWindow.updateTranscript("")
-        transcriptWindow.setStatus("● Recording…  (⌃⇧Fn to stop)")
+        transcriptWindow.setStatus(mode == .interpreter
+            ? "● Interpreting → \(settings.interpreterTargetLanguage)…"
+            : "● Recording…  (⌃⇧Fn to stop)")
         transcriptWindow.setRecording(true)
         if settings.subtitleOverlayEnabled {
             subtitles.show()
@@ -468,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Immediate start feedback: without it users assume the toggle didn't
         // register and press again, which stops the recording they just began.
         NSSound(named: "Pop")?.play()
-        subtitles.flashStatus("● 녹음 시작")
+        subtitles.flashStatus(mode == .interpreter ? "● 통역 시작 → \(settings.interpreterTargetLanguage)" : "● 녹음 시작")
         longForm.start(language: settings.language)
         rebuildMenu()
     }
@@ -745,8 +797,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // Optionally turn the raw transcript into structured meeting
                 // notes (independent of the refinement toggle; runs off the
-                // raw text so neither task waits on the other).
-                if settings.meetingNotesEnabled && settings.llmConfigured {
+                // raw text so neither task waits on the other). Interpreter
+                // sessions save only the conversation — never minutes, even
+                // when the option is on.
+                if settings.meetingNotesEnabled && settings.llmConfigured && lockMode == .meeting {
                     generateMeetingNotes(from: final, stamp: stamp, in: dir)
                 }
             } catch {
@@ -793,6 +847,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openTranscriptWindow() {
         transcriptWindow.showWindow()
+    }
+
+    @objc private func toggleInterpreterMode() {
+        if isLockedRecording {
+            if lockMode == .interpreter { stopLockedRecording() }
+            // A meeting session in progress is left alone.
+        } else {
+            startLockedRecording(mode: .interpreter)
+        }
+    }
+
+    @objc private func selectInterpreterLanguage(_ sender: NSMenuItem) {
+        guard let prompt = sender.representedObject as? String else { return }
+        settings.interpreterTargetLanguage = prompt
+        // Apply live when an interpreter session is running.
+        interpreter.targetLanguage = prompt
+        rebuildMenu()
     }
 
     @objc private func toggleMeetingNotes() {

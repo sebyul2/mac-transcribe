@@ -54,6 +54,7 @@ final class Settings {
         static let longTriggerKeyUsage = "longTriggerKeyUsage"
         static let longTriggerKeyMods = "longTriggerKeyModifiers"
         static let meetingNotes = "meetingNotesEnabled"
+        static let interpreterTarget = "interpreterTargetLanguage"
     }
 
     /// Environment variable name holding the LLM API key. Set it via
@@ -170,6 +171,13 @@ final class Settings {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-5.4-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    /// Target language for the one-way interpreter mode (English name, used
+    /// verbatim in the translation prompt).
+    var interpreterTargetLanguage: String {
+        get { defaults.string(forKey: Keys.interpreterTarget) ?? "English" }
+        set { defaults.set(newValue, forKey: Keys.interpreterTarget) }
     }
 
     /// Generate structured meeting notes with the LLM after a locked
