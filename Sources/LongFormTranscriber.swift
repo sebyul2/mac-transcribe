@@ -56,6 +56,38 @@ final class LongFormTranscriber {
     /// "speech happened but transcription failed" when the transcript is empty.
     private(set) var sessionPeakLevel: Float = 0
 
+    /// Fired on the main thread when audio that was flowing goes quiet for
+    /// `utteranceSilenceGap` — i.e. the speaker finished an utterance. The
+    /// interpreter uses this to cut sentences and speaker turns at real pauses
+    /// instead of guessing from punctuation (which the recognizer withholds)
+    /// or text inactivity (which misfires on recognition lag).
+    var onUtteranceBreak: (() -> Void)?
+    /// Voice-activity state; touched only on the audio callback thread (mic
+    /// tap or the ScreenCaptureKit queue — one source per session).
+    private var voiceActive = false
+    private var lastVoiceAt = Date.distantPast
+    /// Decaying envelope of recent levels; the silence threshold adapts to it
+    /// so dialogue over background music still produces breaks.
+    private var levelEnvelope: Float = 0
+    private let utteranceSilenceGap: TimeInterval = 0.5
+
+    private func trackVoiceActivity(_ level: Float) {
+        // ~20 ms per buffer; 0.995^n halves the envelope in roughly 3 s.
+        levelEnvelope = max(level, levelEnvelope * 0.995)
+        let threshold = max(0.04, levelEnvelope * 0.2)
+        let now = Date()
+        if level >= threshold {
+            voiceActive = true
+            lastVoiceAt = now
+            return
+        }
+        if voiceActive, now.timeIntervalSince(lastVoiceAt) >= utteranceSilenceGap {
+            voiceActive = false
+            SpeechService.diag("longform utterance break (envelope=\(levelEnvelope))")
+            DispatchQueue.main.async { [weak self] in self?.onUtteranceBreak?() }
+        }
+    }
+
     private var combinedTranscript: String {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -82,6 +114,9 @@ final class LongFormTranscriber {
         sessionPeakLevel = 0
         stateLock.unlock()
         tapBufferCount = 0
+        voiceActive = false
+        lastVoiceAt = .distantPast
+        levelEnvelope = 0
         Task { await run(language: language, gen: myGen) }
     }
 
@@ -305,6 +340,7 @@ final class LongFormTranscriber {
 
         // Waveform level, throttled to ~50 Hz.
         let level = Self.level(from: buffer)
+        trackVoiceActivity(level)
         stateLock.lock()
         if level > sessionPeakLevel { sessionPeakLevel = level }
         stateLock.unlock()
@@ -422,6 +458,7 @@ final class LongFormTranscriber {
         }
 
         let level = Self.level(from: buffer)
+        trackVoiceActivity(level)
         stateLock.lock()
         if level > sessionPeakLevel { sessionPeakLevel = level }
         stateLock.unlock()

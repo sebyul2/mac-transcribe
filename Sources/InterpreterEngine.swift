@@ -1,32 +1,37 @@
 import Foundation
 
-/// One-way simultaneous interpretation over the long-form transcript stream,
-/// using the standard re-translation pattern for live captions:
+/// One-way simultaneous interpretation over the long-form transcript stream.
 ///
-/// - Completed sentences are translated once (with the preceding sentences and
-///   their translations as context for pronoun/terminology consistency) and
-///   then frozen, so the display doesn't flicker.
+/// Structure comes from the audio, not the text: LongFormTranscriber's
+/// voice-activity detector reports a break whenever flowing speech goes
+/// silent for half a second — a far sharper utterance boundary than the
+/// recognizer's punctuation (withheld for seconds) or text inactivity (which
+/// misfires on recognition lag). At each break the in-progress tail is
+/// force-completed, the utterance ends (new line in the log), and translation
+/// context stops crossing the boundary, so consecutive speakers are neither
+/// glued into one endless sentence nor translated as one voice.
+///
+/// Rendering uses the standard re-translation pattern for live captions:
+/// - Completed sentences are translated once and frozen, so the display
+///   doesn't flicker.
 /// - The still-spoken tail is re-translated on a short throttle so the screen
 ///   keeps up with speech.
-/// - A tail that stops growing for a moment is force-completed: the recognizer
-///   often withholds punctuation across utterance boundaries, which would
-///   otherwise chain separate utterances into one endless "sentence".
 ///
 /// Translation is a two-tier hybrid:
 /// - Apple's on-device Translation framework (tens of milliseconds) puts a
 ///   draft on screen almost instantly and drives the fast tail refresh.
-/// - The LLM (~1-2 s, prompt context, better quality) replaces each
-///   sentence's draft as its result lands and is what freezes on screen.
+/// - The LLM (~1-2 s, prompt context within the utterance, better quality)
+///   replaces each sentence's draft as its result lands and freezes it.
 /// When the on-device model isn't available for the pair, the LLM serves both
 /// roles, with streamed partials filling the draft gap.
 final class InterpreterEngine {
     /// English name of the target language, interpolated into the LLM prompt.
     var targetLanguage = "English"
     /// Delivered on the main thread after every change: the full translated
-    /// log (for the transcript window) and the caption pieces (for the
-    /// subtitle overlay — only the newest sentences + in-progress tail, so
-    /// captions never reach back into old dialogue; `isFinal` distinguishes
-    /// the LLM's frozen result from fast drafts so the overlay can tint them).
+    /// log (transcript window; one line per utterance/speaker turn) and the
+    /// caption pieces (subtitle overlay — only the newest sentences +
+    /// in-progress tail; `isFinal` distinguishes the LLM's frozen result from
+    /// fast drafts so the overlay can tint them).
     var onDisplay: ((_ full: String, _ caption: [(text: String, isFinal: Bool)]) -> Void)?
     /// How many trailing sentences (plus the live tail) captions may show.
     static let captionSentences = 2
@@ -68,20 +73,22 @@ final class InterpreterEngine {
     private var tailInterval: TimeInterval { onDeviceReady ? 0.15 : 0.45 }
     /// Don't bother translating a tail shorter than this many characters.
     private let tailMinLength = 4
-    /// Ticks while a session runs: drives tail re-translation between feeds
-    /// and the silence-based forced sentence breaks.
+    /// Drives tail re-translation between feeds (a tail spoken just before a
+    /// pause must still be translated even though no new feed() arrives).
     private var tailTimer: Timer?
-    /// How many preceding sentences ride along as LLM prompt context.
+    /// How many preceding sentences (same utterance only) ride along as LLM
+    /// prompt context.
     private let contextSentences = 2
 
-    /// Forced sentence breaks: tails the recognizer never punctuated but that
-    /// went silent long enough to treat as finished utterances. Applied on top
-    /// of punctuation-based splitting, in order, as prefixes of the raw tail.
-    private var forcedSentences: [String] = []
-    private var lastObservedTail = ""
-    private var tailStableSince: Date?
-    /// How long the tail must stay unchanged before it is force-completed.
-    private let forcedBreakDelay: TimeInterval = 1.0
+    /// Sentence breaks imposed by voice-activity silence, applied on top of
+    /// punctuation-based splitting as prefixes of the raw tail. Stored with
+    /// their normalized key so a match survives punctuation that the
+    /// recognizer back-fills later.
+    private var forcedBreaks: [(text: String, key: String)] = []
+    /// Normalized keys of sentences that END an utterance (a speaker pause
+    /// followed them). Line breaks in the log and context barriers for the
+    /// translator.
+    private var utteranceEndKeys: Set<String> = []
 
     func reset() {
         gen &+= 1
@@ -96,9 +103,8 @@ final class InterpreterEngine {
         tailInFlightCount = 0
         lastRequestedTail = ""
         lastTailRequestAt = .distantPast
-        forcedSentences.removeAll()
-        lastObservedTail = ""
-        tailStableSince = nil
+        forcedBreaks.removeAll()
+        utteranceEndKeys.removeAll()
         tailTimer?.invalidate()
         tailTimer = nil
     }
@@ -127,12 +133,36 @@ final class InterpreterEngine {
         }
     }
 
+    // MARK: - Inputs
+
     /// Full accumulated transcript from the recognizer (main thread).
     func feed(_ fullText: String) {
         lastFullText = fullText
-        pruneForcedSentences()
+        pruneForcedBreaks()
         startTailTimerIfNeeded()
         processTranscript()
+    }
+
+    /// Voice-activity silence from the audio pipeline: the speaker paused, so
+    /// whatever is in progress ends HERE — cut the tail into a sentence (its
+    /// quality pass fires immediately) and mark the utterance boundary that
+    /// gives the log its line break and stops context from crossing speakers.
+    func noteUtteranceBreak() {
+        let parts = split(lastFullText)
+        if let tail = parts.tail, tail.count >= tailMinLength {
+            let key = Self.normalizedKey(tail)
+            forcedBreaks.append((tail, key))
+            utteranceEndKeys.insert(key)
+            processTranscript()
+        } else if let last = parts.completed.last {
+            // Punctuation already closed the sentence; the pause just marks
+            // the turn boundary.
+            let key = Self.normalizedKey(last)
+            if !utteranceEndKeys.contains(key) {
+                utteranceEndKeys.insert(key)
+                emit()
+            }
+        }
     }
 
     /// Translates whatever the current transcript needs — newly completed
@@ -204,11 +234,19 @@ final class InterpreterEngine {
         return finals[key] ?? drafts[key]
     }
 
-    /// The last few sentences before `index`, joined, plus their joined
-    /// translations (only when every one has some translation — a partial
-    /// pairing would misalign the prompt).
+    /// The sentences immediately before `index`, joined, plus their joined
+    /// translations — but never across an utterance boundary: the pause means
+    /// the speaker (and voice) likely changed, and carrying the previous
+    /// speaker's words as context makes the LLM translate separate remarks as
+    /// one continuous thought. Translations attach only when every context
+    /// sentence has one (a partial pairing would misalign the prompt).
     private func promptContext(before index: Int, in completed: [String]) -> (String?, String?) {
-        let previous = completed[..<index].suffix(contextSentences)
+        var previous: [String] = []
+        for sentence in completed[..<index].reversed() {
+            if utteranceEndKeys.contains(Self.normalizedKey(sentence)) { break }
+            previous.insert(sentence, at: 0)
+            if previous.count == contextSentences { break }
+        }
         guard !previous.isEmpty else { return (nil, nil) }
         let translated = previous.compactMap { translatedText(for: $0) }
         return (
@@ -217,58 +255,61 @@ final class InterpreterEngine {
         )
     }
 
-    // MARK: - Timer: tail refresh + forced sentence breaks
+    // MARK: - Forced breaks (voice-activity cuts)
+
+    /// Drops forced breaks that no longer line up with the transcript — the
+    /// recognizer re-drew the text beyond punctuation differences. Matching is
+    /// done in normalized space so punctuation the recognizer back-fills after
+    /// the cut doesn't invalidate the break.
+    private func pruneForcedBreaks() {
+        var tail = rawSplit(lastFullText).tail
+        var kept: [(text: String, key: String)] = []
+        for forced in forcedBreaks {
+            guard let t = tail, let (head, rest) = Self.consumeNormalizedPrefix(of: t, key: forced.key) else { break }
+            kept.append((head, forced.key))
+            tail = rest.isEmpty ? nil : rest
+        }
+        forcedBreaks = kept
+    }
+
+    /// If `text` starts with the content of `key` (ignoring whitespace and
+    /// punctuation), returns that leading sentence — including any trailing
+    /// punctuation the recognizer added — and the remainder. Nil when the
+    /// recognizer rewrote the words themselves.
+    private static func consumeNormalizedPrefix(of text: String, key: String) -> (head: String, rest: String)? {
+        var keyIterator = key.makeIterator()
+        var nextKey = keyIterator.next()
+        var index = text.startIndex
+        while index < text.endIndex {
+            let ch = text[index]
+            if !(ch.isWhitespace || ch.isPunctuation) {
+                guard let expected = nextKey, ch == expected else { return nil }
+                nextKey = keyIterator.next()
+            }
+            index = text.index(after: index)
+            if nextKey == nil {
+                // Key consumed — absorb trailing punctuation/space into the head.
+                while index < text.endIndex, text[index].isWhitespace || text[index].isPunctuation {
+                    index = text.index(after: index)
+                }
+                let head = String(text[..<index]).trimmingCharacters(in: .whitespaces)
+                let rest = String(text[index...]).trimmingCharacters(in: .whitespaces)
+                return (head, rest)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Tail re-translation
 
     private func startTailTimerIfNeeded() {
         guard tailTimer == nil else { return }
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.checkForcedBreak()
             self?.maybeTranslateTail()
         }
         RunLoop.main.add(timer, forMode: .common)
         tailTimer = timer
     }
-
-    /// Force-complete a tail that has stopped growing: the speaker paused, but
-    /// the recognizer withheld punctuation, so without this the next utterance
-    /// would chain onto the same "sentence" indefinitely.
-    private func checkForcedBreak() {
-        let parts = split(lastFullText)
-        guard let tail = parts.tail, tail.count >= tailMinLength else {
-            tailStableSince = nil
-            lastObservedTail = ""
-            return
-        }
-        if tail != lastObservedTail {
-            lastObservedTail = tail
-            tailStableSince = Date()
-            return
-        }
-        if let since = tailStableSince, Date().timeIntervalSince(since) >= forcedBreakDelay {
-            forcedSentences.append(tail)
-            tailStableSince = nil
-            lastObservedTail = ""
-            // The promoted sentence needs its quality pass right away.
-            processTranscript()
-        }
-    }
-
-    /// Drops forced breaks that no longer line up with the transcript — the
-    /// recognizer re-drew the text, or real punctuation arrived and the raw
-    /// split absorbed them.
-    private func pruneForcedSentences() {
-        var tail = rawSplit(lastFullText).tail
-        var kept: [String] = []
-        for forced in forcedSentences {
-            guard let t = tail, t.hasPrefix(forced) else { break }
-            kept.append(forced)
-            let rest = String(t.dropFirst(forced.count)).trimmingCharacters(in: .whitespaces)
-            tail = rest.isEmpty ? nil : rest
-        }
-        forcedSentences = kept
-    }
-
-    // MARK: - Tail re-translation
 
     private func maybeTranslateTail() {
         let parts = split(lastFullText)
@@ -377,17 +418,29 @@ final class InterpreterEngine {
     // MARK: - Display
 
     /// Every sentence's best translation (LLM final, else fast draft) plus the
-    /// live tail. Source text is never shown — mixed-language captions read
-    /// worse than a brief gap while a translation is in flight. (A sentence
-    /// whose translations all failed falls back to its source in the feed
-    /// path, so content can't silently vanish.)
+    /// live tail, one line per utterance so speaker turns read as dialogue.
+    /// Source text is never shown — mixed-language captions read worse than a
+    /// brief gap while a translation is in flight. (A sentence whose
+    /// translations all failed falls back to its source in the feed path, so
+    /// content can't silently vanish.)
     var displayText: String {
         let parts = split(lastFullText)
-        var pieces = parts.completed.compactMap { translatedText(for: $0) }
-        if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
-            pieces.append(t.text)
+        var lines: [String] = []
+        var currentLine: [String] = []
+        for sentence in parts.completed {
+            if let translated = translatedText(for: sentence) {
+                currentLine.append(translated)
+            }
+            if utteranceEndKeys.contains(Self.normalizedKey(sentence)), !currentLine.isEmpty {
+                lines.append(currentLine.joined(separator: " "))
+                currentLine = []
+            }
         }
-        return pieces.joined(separator: " ")
+        if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
+            currentLine.append(t.text)
+        }
+        if !currentLine.isEmpty { lines.append(currentLine.joined(separator: " ")) }
+        return lines.joined(separator: "\n")
     }
 
     /// What the subtitle overlay shows: the newest completed sentences'
@@ -426,10 +479,9 @@ final class InterpreterEngine {
     /// to the tail, in order.
     private func split(_ text: String) -> (completed: [String], tail: String?) {
         var (completed, tail) = rawSplit(text)
-        for forced in forcedSentences {
-            guard let t = tail, t.hasPrefix(forced) else { break }
-            completed.append(forced)
-            let rest = String(t.dropFirst(forced.count)).trimmingCharacters(in: .whitespaces)
+        for forced in forcedBreaks {
+            guard let t = tail, let (head, rest) = Self.consumeNormalizedPrefix(of: t, key: forced.key) else { break }
+            completed.append(head)
             tail = rest.isEmpty ? nil : rest
         }
         return (completed, tail)

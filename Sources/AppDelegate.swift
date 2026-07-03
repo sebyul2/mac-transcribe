@@ -336,6 +336,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.autosaveLockedTranscript(text)
         }
+        // Real speaker pauses, detected in the audio itself: the interpreter
+        // cuts sentences and speaker turns here instead of waiting for the
+        // recognizer's (often withheld) punctuation.
+        longForm.onUtteranceBreak = { [weak self] in
+            guard let self, self.lockMode == .interpreter, self.isLockedRecording else { return }
+            self.interpreter.noteUtteranceBreak()
+        }
         interpreter.onDisplay = { [weak self] display, caption in
             self?.transcriptWindow.updateTranscript(display)
             // Captions get only the newest sentences + live tail (never the
