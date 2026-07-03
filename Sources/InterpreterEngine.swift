@@ -47,7 +47,11 @@ final class InterpreterEngine {
     private var lastRequestedOpenKey = ""
     private var lastOpenRequestAt = Date.distantPast
     private let maxOpenInFlight = 2
-    private let openInterval: TimeInterval = 1.0
+    /// Continuation requests mostly emit an unchanged prefix plus the new
+    /// material, so they can run far more often than full retranslations did;
+    /// the source-key guard already skips rounds where nothing new was heard,
+    /// which keeps the real request rate bounded by speech itself.
+    private let openInterval: TimeInterval = 0.35
 
     /// On-device draft of the tail the LLM hasn't covered yet.
     private var tailTranslation: (source: String, text: String)?

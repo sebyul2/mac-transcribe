@@ -43,6 +43,15 @@ final class SubtitleOverlay {
     /// Generation token for flashStatus auto-hide.
     private var flashGen = 0
 
+    /// Broadcast-caption behavior: when the caption content stops changing
+    /// (speech paused), fade the box out after a beat instead of leaving a
+    /// stale line on screen that reads as if it were still being said. New
+    /// content brings it right back.
+    private var lastContent = ""
+    private var lastContentAt = Date.distantPast
+    private var idleTimer: Timer?
+    private let idleFadeAfter: TimeInterval = 4.0
+
     init() {
         let rect = NSRect(x: 0, y: 0, width: 400, height: 44)
         panel = NSPanel(
@@ -109,16 +118,39 @@ final class SubtitleOverlay {
     func show() {
         armed = true
         textField.stringValue = ""
+        lastContent = ""
+        lastContentAt = .distantPast
+        startIdleTimer()
     }
 
     func hide() {
         armed = false
+        idleTimer?.invalidate()
+        idleTimer = nil
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             self?.panel.orderOut(nil)
         })
+    }
+
+    private func startIdleTimer() {
+        idleTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.armed, self.panel.isVisible,
+                  self.lastContentAt != .distantPast,
+                  Date().timeIntervalSince(self.lastContentAt) >= self.idleFadeAfter else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.4
+                self.panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.armed else { return }
+                self.panel.orderOut(nil)
+            })
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        idleTimer = timer
     }
 
     /// Briefly shows a status line (e.g. "● Recording") in the caption spot so
@@ -188,6 +220,12 @@ final class SubtitleOverlay {
                 .paragraphStyle: paragraph,
             ]))
         }
+        // Only a content CHANGE resets the idle clock and re-reveals the
+        // panel — repeated emits of the same text must not resurrect a
+        // caption that idle-faded during a pause.
+        guard styled.string != lastContent else { return }
+        lastContent = styled.string
+        lastContentAt = Date()
         flashGen &+= 1
         textField.attributedStringValue = styled
         layout(for: styled.string)
@@ -213,6 +251,9 @@ final class SubtitleOverlay {
                 tail = String(tail[tail.index(after: space)...])
             }
         }
+        guard tail != lastContent else { return }
+        lastContent = tail
+        lastContentAt = Date()
         // Real speech supersedes any status badge — cancel its auto-hide.
         flashGen &+= 1
         textField.stringValue = tail
@@ -221,9 +262,11 @@ final class SubtitleOverlay {
     }
 
     private func reveal() {
-        guard !panel.isVisible else { return }
-        panel.alphaValue = 0
-        panel.orderFrontRegardless()
+        guard !panel.isVisible || panel.alphaValue < 1 else { return }
+        if !panel.isVisible {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+        }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
             panel.animator().alphaValue = 1
