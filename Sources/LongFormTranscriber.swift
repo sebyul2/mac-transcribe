@@ -163,7 +163,10 @@ final class LongFormTranscriber {
                 locale: language.locale,
                 transcriptionOptions: [],
                 reportingOptions: [.volatileResults, .fastResults],
-                attributeOptions: []
+                // Word-level audio time ranges: pauses the recognizer absorbs
+                // into a run's duration are the only reliable utterance signal
+                // (result-level ranges are gapless; see segmentedFinalText).
+                attributeOptions: [.audioTimeRange]
             )
 
             // Download the long-form model for this locale if it's missing.
@@ -238,24 +241,16 @@ final class LongFormTranscriber {
             do {
                 for try await result in transcriber.results {
                     guard let self, myGen == self.gen else { return }
-                    // Utterance boundaries from the recognizer's own audio
-                    // timestamps: it only tracks speech, so a hole between the
-                    // end of what it heard and the start of this result is a
-                    // real pause — immune to background music that defeats the
-                    // level-based detector. Volatile updates of one utterance
-                    // share their start time, so only the first opens a gap.
-                    let start = result.range.start.seconds
-                    let end = result.range.end.seconds
-                    let gapBefore = self.lastHeardAudioEnd.map {
-                        start.isFinite && start - $0 >= Self.utteranceGapSeconds
-                    } ?? false
-                    if end.isFinite {
-                        self.lastHeardAudioEnd = max(self.lastHeardAudioEnd ?? 0, end)
-                    }
-                    let combined = self.fold(
-                        text: String(result.text.characters),
-                        isFinal: result.isFinal,
-                        gapBefore: gapBefore)
+                    // Finals carry per-word audio time ranges; pauses hide in
+                    // run durations (result-level ranges are gapless, and
+                    // volatile results have no time structure at all — one
+                    // range spanning all processed audio). Segment finals on
+                    // those hidden pauses so the transcript gets its utterance
+                    // structure the moment text is finalized.
+                    let text = result.isFinal
+                        ? Self.segmentedFinalText(result)
+                        : String(result.text.characters)
+                    let combined = self.fold(text: text, isFinal: result.isFinal)
                     DispatchQueue.main.async { self.onTranscript?(combined) }
                 }
             } catch {
@@ -266,25 +261,45 @@ final class LongFormTranscriber {
         }
     }
 
-    /// Furthest audio time (seconds) the recognizer has transcribed through.
-    /// Touched only from the results task.
-    private var lastHeardAudioEnd: Double?
-    /// A pause this long in recognized speech separates utterances; rendered
-    /// as a newline in the transcript.
-    private static let utteranceGapSeconds = 0.35
+    /// A run whose audio span exceeds this absorbed a speech pause (average
+    /// CJK character runs are ~0.15-0.25 s; word runs a little longer).
+    private static let pauseRunDuration = 0.6
+
+    /// Rebuilds a final result's text with newlines at the speech pauses the
+    /// recognizer absorbed into run durations. Verified against real anime
+    /// audio: a long run of spoken text starts a new utterance (the pause
+    /// precedes the word), while a long punctuation/whitespace run trails one
+    /// (the pause follows the mark) — so the break lands before or after
+    /// accordingly.
+    private static func segmentedFinalText(_ result: SpeechTranscriber.Result) -> String {
+        var out = ""
+        var breakPending = false
+        for run in result.text.runs {
+            let piece = String(result.text[run.range].characters)
+            let isSpoken = piece.contains { !$0.isWhitespace && !$0.isPunctuation }
+            let duration = run.audioTimeRange.map { $0.end.seconds - $0.start.seconds } ?? 0
+            if duration >= pauseRunDuration, isSpoken, !out.isEmpty {
+                breakPending = true
+            }
+            if breakPending, isSpoken {
+                out += "\n"
+                breakPending = false
+            }
+            out += piece
+            if duration >= pauseRunDuration, !isSpoken {
+                breakPending = true
+            }
+        }
+        return out
+    }
 
     /// Merges one recognizer result into the accumulated transcript and returns
-    /// the combined text. `gapBefore` marks a speech pause preceding this
-    /// result; the newline it produces gives the transcript (and everything
-    /// downstream — captions, saved files, the interpreter's turn handling)
-    /// its utterance structure. Synchronous so it is safe to call from the
-    /// async results loop without touching the lock in an async context.
-    private func fold(text: String, isFinal: Bool, gapBefore: Bool) -> String {
+    /// the combined text. Synchronous so it is safe to call from the async
+    /// results loop without touching the lock in an async context.
+    private func fold(text: String, isFinal: Bool) -> String {
         stateLock.lock()
-        if gapBefore, !finalizedText.isEmpty { pendingUtteranceGap = true }
         if isFinal {
-            finalizedText += (pendingUtteranceGap ? "\n" : "") + text
-            pendingUtteranceGap = false
+            finalizedText += text
             volatileText = ""
         } else {
             volatileText = text
@@ -292,10 +307,6 @@ final class LongFormTranscriber {
         stateLock.unlock()
         return combinedTranscript
     }
-
-    /// Set when a speech gap precedes the current volatile utterance; the
-    /// newline lands in finalizedText when that utterance finalizes.
-    private var pendingUtteranceGap = false
 
     private func startEngine() throws {
         let engine = AVAudioEngine()
