@@ -167,6 +167,32 @@ final class SubtitleOverlay {
         return result
     }
 
+    /// Interpreter-mode captions: one piece per line, newest last. Draft
+    /// translations (on-device / still in flight) render dimmed; the LLM's
+    /// frozen results render white, so the quality pass is visible as a
+    /// gray-to-white promotion.
+    func update(pieces: [(text: String, isFinal: Bool)]) {
+        guard armed else { return }
+        let recent = pieces.suffix(maxLines)
+        guard recent.contains(where: { $0.text.contains(where: { $0.isLetter || $0.isNumber }) }) else { return }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let styled = NSMutableAttributedString()
+        for (index, piece) in recent.enumerated() {
+            if index > 0 { styled.append(NSAttributedString(string: "\n")) }
+            styled.append(NSAttributedString(string: piece.text, attributes: [
+                .font: font,
+                .foregroundColor: piece.isFinal ? NSColor.white : NSColor.white.withAlphaComponent(0.55),
+                .paragraphStyle: paragraph,
+            ]))
+        }
+        flashGen &+= 1
+        textField.attributedStringValue = styled
+        layout(for: styled.string)
+        reveal()
+    }
+
     /// Feeds the full accumulated transcript; the overlay shows only the tail,
     /// caption-style, and only once there is actual speech to show.
     func update(fullText: String) {
@@ -186,15 +212,20 @@ final class SubtitleOverlay {
                 tail = String(tail[tail.index(after: space)...])
             }
         }
+        // Real speech supersedes any status badge — cancel its auto-hide.
+        flashGen &+= 1
         textField.stringValue = tail
         layout(for: tail.isEmpty ? " " : tail)
-        if !panel.isVisible {
-            panel.alphaValue = 0
-            panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.2
-                panel.animator().alphaValue = 1
-            }
+        reveal()
+    }
+
+    private func reveal() {
+        guard !panel.isVisible else { return }
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            panel.animator().alphaValue = 1
         }
     }
 

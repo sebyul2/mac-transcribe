@@ -338,10 +338,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         interpreter.onDisplay = { [weak self] display, caption in
             self?.transcriptWindow.updateTranscript(display)
-            // Captions get only the newest sentence + live tail; feeding the
-            // full log here made the "last two sentences" reach back into old
-            // dialogue whenever recent translations were still in flight.
-            self?.subtitles.update(fullText: caption)
+            // Captions get only the newest sentences + live tail (never the
+            // full log, which would reach back into old dialogue while recent
+            // translations are in flight); drafts render dimmed until the
+            // LLM's result promotes them to white.
+            self?.subtitles.update(pieces: caption)
         }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         longForm.onStatus = { [weak self] status in
