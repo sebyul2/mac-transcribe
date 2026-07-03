@@ -156,7 +156,7 @@ final class SubtitleOverlay {
         var current = ""
         for ch in text {
             current.append(ch)
-            if ".?!。？！".contains(ch) {
+            if ".?!。？！\n".contains(ch) {
                 let trimmed = current.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty { result.append(trimmed) }
                 current = ""

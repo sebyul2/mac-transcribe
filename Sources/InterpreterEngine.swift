@@ -73,6 +73,10 @@ final class InterpreterEngine {
     private var tailInterval: TimeInterval { onDeviceReady ? 0.15 : 0.45 }
     /// Don't bother translating a tail shorter than this many characters.
     private let tailMinLength = 4
+    /// Last-resort cut: a tail this long is force-completed even without any
+    /// pause or punctuation, so the quality pass can never be starved for
+    /// tens of seconds by a speaker (or soundtrack) that simply doesn't stop.
+    private let maxTailLength = 60
     /// Drives tail re-translation between feeds (a tail spoken just before a
     /// pause must still be translated even though no new feed() arrives).
     private var tailTimer: Timer?
@@ -136,11 +140,27 @@ final class InterpreterEngine {
     // MARK: - Inputs
 
     /// Full accumulated transcript from the recognizer (main thread).
+    /// Newlines in it are utterance boundaries detected from the recognizer's
+    /// audio timestamps (see LongFormTranscriber.fold).
     func feed(_ fullText: String) {
         lastFullText = fullText
+        markUtteranceEnds()
         pruneForcedBreaks()
         startTailTimerIfNeeded()
         processTranscript()
+    }
+
+    /// Newline = utterance boundary: mark the sentence that closes each turn
+    /// so the log breaks lines there and context never crosses it.
+    private func markUtteranceEnds() {
+        let turns = lastFullText.components(separatedBy: "\n")
+        guard turns.count > 1 else { return }
+        for turn in turns.dropLast() {
+            let parts = rawSplit(turn)
+            if let last = parts.tail ?? parts.completed.last {
+                utteranceEndKeys.insert(Self.normalizedKey(last))
+            }
+        }
     }
 
     /// Voice-activity silence from the audio pipeline: the speaker paused, so
@@ -305,15 +325,32 @@ final class InterpreterEngine {
     private func startTailTimerIfNeeded() {
         guard tailTimer == nil else { return }
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.checkTailOverrun()
             self?.maybeTranslateTail()
         }
         RunLoop.main.add(timer, forMode: .common)
         tailTimer = timer
     }
 
+    /// Cut a runaway tail into a sentence (no utterance mark — the speaker is
+    /// still going) so translation keeps flowing through continuous speech.
+    private func checkTailOverrun() {
+        let parts = split(lastFullText)
+        guard let tail = parts.tail, tail.count >= maxTailLength else { return }
+        forcedBreaks.append((tail, Self.normalizedKey(tail)))
+        processTranscript()
+    }
+
     private func maybeTranslateTail() {
         let parts = split(lastFullText)
         guard let tail = parts.tail, tail.count >= tailMinLength else { return }
+        // Watchdog: if both slots have been stuck for 10 s, a response was
+        // lost (dead stream, dropped continuation) — reclaim them rather than
+        // silently freezing the caption for the rest of the session.
+        if tailInFlightCount >= maxTailInFlight,
+           Date().timeIntervalSince(lastTailRequestAt) > 10 {
+            tailInFlightCount = 0
+        }
         guard tailInFlightCount < maxTailInFlight else { return }
         guard lastRequestedTail != tail, tailTranslation?.source != tail else { return }
         guard Date().timeIntervalSince(lastTailRequestAt) >= tailInterval else { return }
@@ -473,7 +510,10 @@ final class InterpreterEngine {
 
     // MARK: - Sentence splitting
 
-    private static let terminators: Set<Character> = [".", "?", "!", "。", "？", "！"]
+    /// Newline is a terminator too: LongFormTranscriber inserts one at every
+    /// speech pause it detects from the recognizer's audio timestamps, so an
+    /// utterance completes even when the recognizer withholds punctuation.
+    private static let terminators: Set<Character> = [".", "?", "!", "。", "？", "！", "\n"]
 
     /// Punctuation-based split plus the forced (silence-based) breaks applied
     /// to the tail, in order.
@@ -495,12 +535,12 @@ final class InterpreterEngine {
         for ch in text {
             current.append(ch)
             if Self.terminators.contains(ch) {
-                let trimmed = current.trimmingCharacters(in: .whitespaces)
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { completed.append(trimmed) }
                 current = ""
             }
         }
-        let tail = current.trimmingCharacters(in: .whitespaces)
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
         return (completed, tail.isEmpty ? nil : tail)
     }
 }

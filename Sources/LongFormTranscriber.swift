@@ -69,7 +69,7 @@ final class LongFormTranscriber {
     /// Decaying envelope of recent levels; the silence threshold adapts to it
     /// so dialogue over background music still produces breaks.
     private var levelEnvelope: Float = 0
-    private let utteranceSilenceGap: TimeInterval = 0.5
+    private let utteranceSilenceGap: TimeInterval = 0.35
 
     private func trackVoiceActivity(_ level: Float) {
         // ~20 ms per buffer; 0.995^n halves the envelope in roughly 3 s.
@@ -238,7 +238,24 @@ final class LongFormTranscriber {
             do {
                 for try await result in transcriber.results {
                     guard let self, myGen == self.gen else { return }
-                    let combined = self.fold(text: String(result.text.characters), isFinal: result.isFinal)
+                    // Utterance boundaries from the recognizer's own audio
+                    // timestamps: it only tracks speech, so a hole between the
+                    // end of what it heard and the start of this result is a
+                    // real pause — immune to background music that defeats the
+                    // level-based detector. Volatile updates of one utterance
+                    // share their start time, so only the first opens a gap.
+                    let start = result.range.start.seconds
+                    let end = result.range.end.seconds
+                    let gapBefore = self.lastHeardAudioEnd.map {
+                        start.isFinite && start - $0 >= Self.utteranceGapSeconds
+                    } ?? false
+                    if end.isFinite {
+                        self.lastHeardAudioEnd = max(self.lastHeardAudioEnd ?? 0, end)
+                    }
+                    let combined = self.fold(
+                        text: String(result.text.characters),
+                        isFinal: result.isFinal,
+                        gapBefore: gapBefore)
                     DispatchQueue.main.async { self.onTranscript?(combined) }
                 }
             } catch {
@@ -249,13 +266,25 @@ final class LongFormTranscriber {
         }
     }
 
+    /// Furthest audio time (seconds) the recognizer has transcribed through.
+    /// Touched only from the results task.
+    private var lastHeardAudioEnd: Double?
+    /// A pause this long in recognized speech separates utterances; rendered
+    /// as a newline in the transcript.
+    private static let utteranceGapSeconds = 0.35
+
     /// Merges one recognizer result into the accumulated transcript and returns
-    /// the combined text. Synchronous so it is safe to call from the async
-    /// results loop without touching the lock in an async context.
-    private func fold(text: String, isFinal: Bool) -> String {
+    /// the combined text. `gapBefore` marks a speech pause preceding this
+    /// result; the newline it produces gives the transcript (and everything
+    /// downstream — captions, saved files, the interpreter's turn handling)
+    /// its utterance structure. Synchronous so it is safe to call from the
+    /// async results loop without touching the lock in an async context.
+    private func fold(text: String, isFinal: Bool, gapBefore: Bool) -> String {
         stateLock.lock()
+        if gapBefore, !finalizedText.isEmpty { pendingUtteranceGap = true }
         if isFinal {
-            finalizedText += text
+            finalizedText += (pendingUtteranceGap ? "\n" : "") + text
+            pendingUtteranceGap = false
             volatileText = ""
         } else {
             volatileText = text
@@ -263,6 +292,10 @@ final class LongFormTranscriber {
         stateLock.unlock()
         return combinedTranscript
     }
+
+    /// Set when a speech gap precedes the current volatile utterance; the
+    /// newline lands in finalizedText when that utterance finalizes.
+    private var pendingUtteranceGap = false
 
     private func startEngine() throws {
         let engine = AVAudioEngine()
