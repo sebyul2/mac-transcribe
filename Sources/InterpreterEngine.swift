@@ -208,17 +208,14 @@ final class InterpreterEngine {
     // MARK: - Display
 
     /// Frozen sentence translations plus the best available tail rendering.
+    /// Source text is never shown — mixed-language captions read worse than a
+    /// sub-second gap while a translation is in flight. (A failed translation
+    /// still falls back to its source via apply(), so content can't vanish.)
     var displayText: String {
         let parts = split(lastFullText)
-        var pieces = parts.completed.map { translations[$0] ?? $0 }
-        if let tail = parts.tail {
-            if let t = tailTranslation, tail.hasPrefix(t.source) {
-                // Show the translated portion plus whatever was spoken since.
-                let grown = String(tail.dropFirst(t.source.count)).trimmingCharacters(in: .whitespaces)
-                pieces.append(grown.isEmpty ? t.text : "\(t.text) \(grown)")
-            } else {
-                pieces.append(tail)
-            }
+        var pieces = parts.completed.compactMap { translations[$0] }
+        if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
+            pieces.append(t.text)
         }
         return pieces.joined(separator: " ")
     }
