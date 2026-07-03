@@ -3,40 +3,47 @@ import Foundation
 /// One-way simultaneous interpretation over the long-form transcript stream,
 /// using the standard re-translation pattern for live captions:
 ///
-/// - Completed sentences are translated once (with the preceding sentence and
-///   its translation as context for pronoun/terminology consistency) and then
-///   frozen, so the display doesn't flicker.
+/// - Completed sentences are translated once (with the preceding sentences and
+///   their translations as context for pronoun/terminology consistency) and
+///   then frozen, so the display doesn't flicker.
 /// - The still-spoken tail is re-translated on a short throttle so the screen
-///   keeps up with speech; while a newer tail is in flight, the last tail
-///   translation is shown with the freshly spoken original appended.
+///   keeps up with speech.
 ///
-/// Translation backend, fastest first:
-/// - Apple's on-device Translation framework when the language pair's model is
-///   installed — tens of milliseconds per request, so the throttle tightens.
-/// - Otherwise the configured LLM with zero reasoning effort and streamed
-///   partials (words render as SSE deltas arrive instead of ~2 s later).
+/// Translation is a two-tier hybrid:
+/// - Apple's on-device Translation framework (tens of milliseconds) puts a
+///   draft on screen almost instantly and drives the fast tail refresh.
+/// - The LLM (~1-2 s, prompt context, better quality) replaces each
+///   sentence's draft as its result lands and is what freezes on screen.
+/// When the on-device model isn't available for the pair, the LLM serves both
+/// roles, with streamed partials filling the draft gap.
 final class InterpreterEngine {
     /// English name of the target language, interpolated into the LLM prompt.
     var targetLanguage = "English"
     /// Delivered on the main thread after every change: the full translated
     /// log (for the transcript window) and the caption tail (for the subtitle
-    /// overlay — only the newest sentence + in-progress tail, so captions
+    /// overlay — only the newest sentences + in-progress tail, so captions
     /// never reach back into old dialogue while fresh translations are still
     /// in flight).
     var onDisplay: ((_ full: String, _ caption: String) -> Void)?
+    /// How many trailing sentences (plus the live tail) captions may show.
+    static let captionSentences = 2
 
-    /// Normalized completed sentence → frozen translation. Keys strip
-    /// whitespace and punctuation because the recognizer keeps re-drawing
-    /// sentence boundaries (especially Chinese punctuation arrives late); a
-    /// raw-text key would miss the cache on every such wobble and re-translate
-    /// sentences that were already on screen.
-    private var translations: [String: String] = [:]
+    /// Normalized completed sentence → LLM translation (frozen once set).
+    /// Keys strip whitespace and punctuation because the recognizer keeps
+    /// re-drawing sentence boundaries (Chinese punctuation especially arrives
+    /// late); a raw-text key would miss the cache on every such wobble and
+    /// re-translate sentences that were already on screen.
+    private var finals: [String: String] = [:]
+    /// Normalized sentence → fast draft (on-device result, or streamed LLM
+    /// partial while no on-device backend is up). Shown until finals wins.
+    private var drafts: [String: String] = [:]
     private var pending: Set<String> = []
+    private var draftPending: Set<String> = []
     private var lastFullText = ""
     /// Bumped on reset() so late callbacks from a previous session are ignored.
     private var gen = 0
 
-    /// On-device translator; used whenever the session came up successfully.
+    /// On-device translator; drafts and tail refresh whenever it came up.
     private let onDevice = AppleTranslator()
     private var onDeviceReady = false
 
@@ -66,8 +73,10 @@ final class InterpreterEngine {
 
     func reset() {
         gen &+= 1
-        translations.removeAll()
+        finals.removeAll()
+        drafts.removeAll()
         pending.removeAll()
+        draftPending.removeAll()
         lastFullText = ""
         tailTranslation = nil
         tailSeq = 0
@@ -80,7 +89,7 @@ final class InterpreterEngine {
     }
 
     /// Bring up the on-device session for this pair; until (and unless) it
-    /// reports ready, requests go to the LLM. Call teardown() after the session.
+    /// reports ready, the LLM covers drafts too. Call teardown() afterwards.
     func prepareOnDevice(source: Locale.Language, target: Locale.Language) {
         onDeviceReady = false
         onDevice.start(source: source, target: target) { [weak self] ready in
@@ -109,23 +118,52 @@ final class InterpreterEngine {
         startTailTimerIfNeeded()
 
         let parts = split(fullText)
-        // Translate each newly completed sentence, with its preceding
-        // sentences (and their translations, when known) as context. Streamed
-        // partials show up immediately and the final result overwrites them.
         for (index, sentence) in parts.completed.enumerated() {
             let key = Self.normalizedKey(sentence)
-            guard translations[key] == nil, !pending.contains(key) else { continue }
+
+            // A sentence that just completed was, until this instant, the
+            // tail — promote its latest tail translation to the sentence's
+            // draft so the caption never waits on a fresh round trip.
+            if finals[key] == nil, drafts[key] == nil,
+               let t = tailTranslation, Self.normalizedKey(t.source) == key {
+                drafts[key] = t.text
+            }
+
+            // Fast draft: on-device puts something readable up in ~100 ms
+            // while the LLM round trip is still in flight.
+            if onDeviceReady, finals[key] == nil, drafts[key] == nil, !draftPending.contains(key) {
+                draftPending.insert(key)
+                requestOnDevice(sentence) { [weak self] draft in
+                    guard let self else { return }
+                    self.draftPending.remove(key)
+                    if let draft, self.finals[key] == nil { self.drafts[key] = draft }
+                }
+            }
+
+            // Quality pass: the LLM result replaces the draft and freezes.
+            guard finals[key] == nil, !pending.contains(key) else { continue }
             pending.insert(key)
             let (context, contextTranslation) = promptContext(before: index, in: parts.completed)
-            requestTranslation(
-                of: sentence,
+            requestLLM(
+                sentence,
                 context: context,
                 contextTranslation: contextTranslation,
-                onPartial: { [weak self] _, partial in
-                    self?.translations[key] = partial
+                // With a draft on screen, streamed partials would only make
+                // the caption regress to a half sentence; without on-device
+                // they are the draft.
+                onPartial: onDeviceReady ? nil : { [weak self] partial in
+                    self?.drafts[key] = partial
                 },
-                apply: { [weak self] _, translated in
-                    self?.translations[key] = translated
+                completion: { [weak self] final in
+                    guard let self else { return }
+                    self.pending.remove(key)
+                    if let final {
+                        self.finals[key] = final
+                    } else if self.drafts[key] == nil {
+                        // Both tiers failed — keep the source rather than
+                        // silently dropping what was said.
+                        self.finals[key] = sentence
+                    }
                 }
             )
         }
@@ -140,13 +178,18 @@ final class InterpreterEngine {
         return stripped.isEmpty ? sentence : stripped
     }
 
+    private func translatedText(for sentence: String) -> String? {
+        let key = Self.normalizedKey(sentence)
+        return finals[key] ?? drafts[key]
+    }
+
     /// The last few sentences before `index`, joined, plus their joined
-    /// translations (only when every one is already translated — a partial
+    /// translations (only when every one has some translation — a partial
     /// pairing would misalign the prompt).
     private func promptContext(before index: Int, in completed: [String]) -> (String?, String?) {
         let previous = completed[..<index].suffix(contextSentences)
         guard !previous.isEmpty else { return (nil, nil) }
-        let translated = previous.compactMap { translations[Self.normalizedKey($0)] }
+        let translated = previous.compactMap { translatedText(for: $0) }
         return (
             previous.joined(separator: " "),
             translated.count == previous.count ? translated.joined(separator: " ") : nil
@@ -176,64 +219,67 @@ final class InterpreterEngine {
         tailInFlightCount += 1
         lastRequestedTail = tail
         lastTailRequestAt = Date()
-        let (context, contextTranslation) = promptContext(before: parts.completed.count, in: parts.completed)
-        let myGen = gen
-        requestTranslation(
-            of: tail,
-            context: context,
-            contextTranslation: contextTranslation,
-            isFragment: true,
-            onPartial: { [weak self] source, partial in
-                guard let self, seq >= self.tailAppliedSeq else { return }
+
+        // Overlapping requests may complete out of order; an older response
+        // must never replace a newer tail on screen.
+        let applyTail: (String?) -> Void = { [weak self] translated in
+            guard let self else { return }
+            self.tailInFlightCount -= 1
+            if let translated, seq >= self.tailAppliedSeq {
                 self.tailAppliedSeq = seq
-                self.tailTranslation = (source, partial)
-            },
-            apply: { [weak self] source, translated in
-                guard let self, myGen == self.gen else { return }
-                self.tailInFlightCount -= 1
-                // Overlapping requests may complete out of order; an older
-                // response must never replace a newer tail on screen.
-                if seq >= self.tailAppliedSeq {
-                    self.tailAppliedSeq = seq
-                    self.tailTranslation = (source, translated)
-                }
-                // The tail may have grown while this was in flight; check again.
-                self.maybeTranslateTail()
+                self.tailTranslation = (tail, translated)
             }
-        )
-    }
-
-    /// Routes one translation to the fastest available backend. `onPartial`
-    /// and `apply` are both invoked on the main thread, guarded by the
-    /// generation token; `apply` always fires exactly once at the end.
-    private func requestTranslation(
-        of text: String,
-        context: String?,
-        contextTranslation: String?,
-        isFragment: Bool = false,
-        onPartial: ((String, String) -> Void)? = nil,
-        apply: @escaping (String, String) -> Void
-    ) {
-        let myGen = gen
-
-        func finish(_ translated: String?) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, myGen == self.gen else { return }
-                self.pending.remove(Self.normalizedKey(text))
-                let trimmed = translated?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                // Keep the original visible rather than blocking the feed.
-                apply(text, trimmed.isEmpty ? text : trimmed)
-                self.emit()
-            }
+            // The tail may have grown while this was in flight; check again.
+            self.maybeTranslateTail()
         }
 
         if onDeviceReady {
-            onDevice.translate(text) { translated in
-                finish(translated)
-            }
+            requestOnDevice(tail, completion: applyTail)
             return
         }
+        let (context, contextTranslation) = promptContext(before: parts.completed.count, in: parts.completed)
+        requestLLM(
+            tail,
+            context: context,
+            contextTranslation: contextTranslation,
+            isFragment: true,
+            onPartial: { [weak self] partial in
+                guard let self, seq >= self.tailAppliedSeq else { return }
+                self.tailAppliedSeq = seq
+                self.tailTranslation = (tail, partial)
+            },
+            completion: applyTail
+        )
+    }
 
+    // MARK: - Backends
+
+    /// On-device translation. `completion` runs on the main thread with a
+    /// trimmed non-empty result or nil, guarded by the generation token;
+    /// emit() follows automatically.
+    private func requestOnDevice(_ text: String, completion: @escaping (String?) -> Void) {
+        let myGen = gen
+        onDevice.translate(text) { translated in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, myGen == self.gen else { return }
+                let trimmed = translated?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                completion(trimmed.isEmpty ? nil : trimmed)
+                self.emit()
+            }
+        }
+    }
+
+    /// LLM translation. Same contract as requestOnDevice; `onPartial`
+    /// additionally streams the accumulated output as SSE deltas arrive.
+    private func requestLLM(
+        _ text: String,
+        context: String?,
+        contextTranslation: String?,
+        isFragment: Bool = false,
+        onPartial: ((String) -> Void)? = nil,
+        completion: @escaping (String?) -> Void
+    ) {
+        let myGen = gen
         LLMRefiner.translate(
             text,
             to: targetLanguage,
@@ -246,45 +292,49 @@ final class InterpreterEngine {
                         guard let self, myGen == self.gen else { return }
                         let trimmed = partial.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { return }
-                        deliver(text, trimmed)
+                        deliver(trimmed)
                         self.emit()
                     }
                 }
             }
         ) { result in
-            switch result {
-            case .success(let translated): finish(translated)
-            case .failure: finish(nil)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, myGen == self.gen else { return }
+                if case .success(let translated) = result {
+                    let trimmed = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                    completion(trimmed.isEmpty ? nil : trimmed)
+                } else {
+                    completion(nil)
+                }
+                self.emit()
             }
         }
     }
 
     // MARK: - Display
 
-    /// Frozen sentence translations plus the best available tail rendering.
-    /// Source text is never shown — mixed-language captions read worse than a
-    /// sub-second gap while a translation is in flight. (A failed translation
-    /// still falls back to its source via apply(), so content can't vanish.)
+    /// Every sentence's best translation (LLM final, else fast draft) plus the
+    /// live tail. Source text is never shown — mixed-language captions read
+    /// worse than a brief gap while a translation is in flight. (A sentence
+    /// whose translations all failed falls back to its source in feed(), so
+    /// content can't silently vanish.)
     var displayText: String {
         let parts = split(lastFullText)
-        var pieces = parts.completed.compactMap { translations[Self.normalizedKey($0)] }
+        var pieces = parts.completed.compactMap { translatedText(for: $0) }
         if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
             pieces.append(t.text)
         }
         return pieces.joined(separator: " ")
     }
 
-    /// What the subtitle overlay shows: the newest completed sentence's
-    /// translation (when it has arrived) plus the live tail. Deliberately NOT
-    /// a suffix of displayText — there, sentences whose translations are still
-    /// in flight drop out, so the "last two sentences" would reach back into
-    /// old dialogue and captions would jump between past and present.
+    /// What the subtitle overlay shows: the newest completed sentences'
+    /// translations (when they have arrived) plus the live tail. Deliberately
+    /// NOT a suffix of displayText — there, sentences whose translations are
+    /// still in flight drop out, so a "last N sentences" cut would reach back
+    /// into old dialogue and captions would jump between past and present.
     var captionText: String {
         let parts = split(lastFullText)
-        var pieces: [String] = []
-        if let last = parts.completed.last, let translated = translations[Self.normalizedKey(last)] {
-            pieces.append(translated)
-        }
+        var pieces = parts.completed.suffix(Self.captionSentences).compactMap { translatedText(for: $0) }
         if let tail = parts.tail, let t = tailTranslation, tail.hasPrefix(t.source) {
             pieces.append(t.text)
         }

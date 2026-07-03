@@ -496,12 +496,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if mode == .interpreter {
             interpreter.reset()
             interpreter.targetLanguage = settings.interpreterTargetLanguage
-            // On-device Apple Translation was tried here and rejected: fast
-            // (~60 ms) but noticeably worse quality with no context input.
-            // Interpretation stays on the LLM; pre-warm the path instead so
-            // the first sentence skips token refresh + TLS setup.
+            // Two-tier translation: on-device drafts land in ~100 ms, the LLM
+            // (pre-warmed here so the first sentence skips token refresh and
+            // TLS setup) replaces them with quality results as they arrive.
+            interpreter.prepareOnDevice(
+                source: settings.language.locale.language,
+                target: InterpreterEngine.localeLanguage(forPrompt: settings.interpreterTargetLanguage))
             LLMRefiner.warmUpTranslation(to: settings.interpreterTargetLanguage)
         }
+        // Interpreter captions run a line taller: translations trail speech,
+        // so the extra sentence of continuity keeps them readable.
+        subtitles.maxLines = mode == .interpreter ? 3 : 2
         longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
         NSLog("MacWhisper[App]: locked recording started mode=\(mode)")
         // Tear down the short push-to-talk session left over from the

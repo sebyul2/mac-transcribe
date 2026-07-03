@@ -24,9 +24,14 @@ final class SubtitleOverlay {
     private let vPadding: CGFloat = 10
     private let bottomMargin: CGFloat = 14
     private let cornerRadius: CGFloat = 8
-    private let maxLines = 2
+    /// Caption height in lines/sentences: 2 for plain recording, 3 in
+    /// interpreter mode where translations trail speech and benefit from the
+    /// extra line of continuity.
+    var maxLines = 2 {
+        didSet { textField.maximumNumberOfLines = maxLines }
+    }
     /// Roughly the last caption-worth of text to show.
-    private let tailLength = 140
+    private var tailLength: Int { maxLines * 70 }
     private let closeSize: CGFloat = 20
     /// Extra room above/right of the caption box for the overhanging button.
     private var overhang: CGFloat { closeSize / 2 }
@@ -168,10 +173,10 @@ final class SubtitleOverlay {
         guard armed else { return }
         // No captions until something was actually said.
         guard fullText.contains(where: { $0.isLetter || $0.isNumber }) else { return }
-        // Real-subtitle line breaking: the last two sentences, one per line,
+        // Real-subtitle line breaking: the last few sentences, one per line,
         // so a continuing speech wraps at utterance boundaries instead of
         // stretching into one endless line.
-        let recent = Self.sentences(of: String(fullText.suffix(tailLength * 2))).suffix(2)
+        let recent = Self.sentences(of: String(fullText.suffix(tailLength * 2))).suffix(maxLines)
         var tail = recent.joined(separator: "\n")
         if tail.count > tailLength {
             // A single run-on sentence: fall back to a word-aligned tail and
