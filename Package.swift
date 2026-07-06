@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacWhisper",
+    name: "MacTranscribe",
     platforms: [
         // macOS 26 is required: NSGlassEffectView (Liquid Glass) only renders the
         // real frosted/refractive material when the app's deployment target is 26+.
@@ -12,7 +12,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "MacWhisper",
+            name: "MacTranscribe",
             path: "Sources"
         )
     ]

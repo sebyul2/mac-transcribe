@@ -29,6 +29,10 @@ final class SpeechService {
     /// Continuous silence (seconds) after speech that triggers the auto-stop.
     var silenceTimeout: TimeInterval = 2.5
 
+    /// User glossary terms passed to the recognizer as contextual hints so
+    /// domain-specific names/jargon are favored during recognition itself.
+    var contextualStrings: [String] = []
+
     private var audioEngine: AVAudioEngine?
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -115,12 +119,14 @@ final class SpeechService {
         Self.diag("session start lang=\(language.rawValue) autoStop=\(silenceAutoStopEnabled) thr=\(silenceThreshold)")
 
         guard let recognizer = SFSpeechRecognizer(locale: language.locale), recognizer.isAvailable else {
-            NSLog("MacWhisper: recognizer unavailable for \(language.rawValue)")
+            NSLog("MacTranscribe: recognizer unavailable for \(language.rawValue)")
             isStarting = false
             return
         }
         self.recognizer = recognizer
-        NSLog("MacWhisper[Speech]: starting language=\(language.rawValue) onDevice=\(recognizer.supportsOnDeviceRecognition)")
+        currentLanguage = language
+        consecutiveErrorRestarts = 0
+        NSLog("MacTranscribe[Speech]: starting language=\(language.rawValue) onDevice=\(recognizer.supportsOnDeviceRecognition)")
 
         // Force the built-in mic for this session: capturing through a Bluetooth
         // headset's mic degrades it to 16 kHz HFP (muffled output + poor accuracy).
@@ -152,7 +158,7 @@ final class SpeechService {
         // The input node reports a zero/nil format before it's bound to a device;
         // installing a tap with such a format throws internally.
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            NSLog("MacWhisper[Speech]: invalid input format (rate=\(format.sampleRate) ch=\(format.channelCount))")
+            NSLog("MacTranscribe[Speech]: invalid input format (rate=\(format.sampleRate) ch=\(format.channelCount))")
             isStarting = false
             cleanup()
             return
@@ -173,7 +179,7 @@ final class SpeechService {
             if level > self.sessionPeakLevel { self.sessionPeakLevel = level }
             let voiceActive = level >= self.silenceThreshold
             if Self.debugLogging && (tapBufferCount <= 3 || tapBufferCount % 100 == 0) {
-                NSLog("MacWhisper[Speech][DEBUG]: tap #\(tapBufferCount) level=\(level) peak=\(self.sessionPeakLevel) voice=\(voiceActive)")
+                NSLog("MacTranscribe[Speech][DEBUG]: tap #\(tapBufferCount) level=\(level) peak=\(self.sessionPeakLevel) voice=\(voiceActive)")
             }
 
             // Always forward the raw audio so recognition is never starved (dropping
@@ -186,7 +192,7 @@ final class SpeechService {
             let req = self.request
             self.stateLock.unlock()
             if Self.debugLogging, req == nil, tapBufferCount <= 10 {
-                NSLog("MacWhisper[Speech][DEBUG]: tap #\(tapBufferCount) request is NIL — buffer dropped!")
+                NSLog("MacTranscribe[Speech][DEBUG]: tap #\(tapBufferCount) request is NIL — buffer dropped!")
             }
             req?.append(buffer)
 
@@ -211,9 +217,9 @@ final class SpeechService {
             isRunning = true
             isStarting = false
             startSilenceMonitor()
-            NSLog("MacWhisper[Speech]: audio engine started")
+            NSLog("MacTranscribe[Speech]: audio engine started")
         } catch {
-            NSLog("MacWhisper: audio engine failed to start: \(error)")
+            NSLog("MacTranscribe: audio engine failed to start: \(error)")
             isStarting = false
             cleanup()
         }
@@ -222,6 +228,11 @@ final class SpeechService {
     /// Creates the recognition request + task. Extracted so a mid-hold segment
     /// finalization can transparently restart a fresh segment (see the callback).
     private var recognitionTaskCount = 0
+    /// Consecutive segment restarts caused by recognizer errors; used to decide
+    /// when the recognizer itself needs rebuilding. Reset on any real result.
+    private var consecutiveErrorRestarts = 0
+    /// Language of the running session, needed to rebuild a wedged recognizer.
+    private var currentLanguage: RecognitionLanguage?
     private func startRecognitionTask() {
         guard let recognizer else { return }
         recognitionTaskCount += 1
@@ -231,8 +242,11 @@ final class SpeechService {
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
+        if !contextualStrings.isEmpty {
+            request.contextualStrings = contextualStrings
+        }
         self.request = request
-        NSLog("MacWhisper[Speech][DEBUG]: startRecognitionTask #\(recognitionTaskCount) onDevice=\(request.requiresOnDeviceRecognition)")
+        NSLog("MacTranscribe[Speech][DEBUG]: startRecognitionTask #\(recognitionTaskCount) onDevice=\(request.requiresOnDeviceRecognition)")
 
         // Capture the generation this task belongs to so a late callback from a
         // superseded session can't fire finish() on the current one.
@@ -241,7 +255,7 @@ final class SpeechService {
             guard let self else { return }
             if let result {
                 if Self.debugLogging {
-                    NSLog("MacWhisper[Speech][DEBUG]: callback result isFinal=\(result.isFinal) text='\(result.bestTranscription.formattedString)'")
+                    NSLog("MacTranscribe[Speech][DEBUG]: callback result isFinal=\(result.isFinal) text='\(result.bestTranscription.formattedString)'")
                 }
                 self.stateLock.lock()
                 self.latestTranscript = result.bestTranscription.formattedString
@@ -249,26 +263,31 @@ final class SpeechService {
                 self.stateLock.unlock()
                 DispatchQueue.main.async { self.onTranscript?(combined) }
             }
+            if result != nil {
+                self.consecutiveErrorRestarts = 0
+            }
             if let error = error {
                 let nsError = error as NSError
-                NSLog("MacWhisper[Speech]: recognition error=\(error.localizedDescription) domain=\(nsError.domain) code=\(nsError.code)")
+                NSLog("MacTranscribe[Speech]: recognition error=\(error.localizedDescription) domain=\(nsError.domain) code=\(nsError.code)")
+                Self.diag("recognition error domain=\(nsError.domain) code=\(nsError.code) task=\(self.recognitionTaskCount)")
             }
             let segmentEnded = error != nil || (result?.isFinal ?? false)
             guard segmentEnded else { return }
+            let endedWithError = error != nil
 
             self.stateLock.lock()
             let stopping = self.isStopping
             self.stateLock.unlock()
             if stopping {
                 // Flushing after Fn-release / VAD — this is the true session end.
-                NSLog("MacWhisper[Speech][DEBUG]: segment ended, stopping -> finish()")
+                NSLog("MacTranscribe[Speech][DEBUG]: segment ended, stopping -> finish()")
                 self.finish(expectedGen: taskGen)
             } else {
                 // The recognizer finalized a segment on its own (it does this after
                 // a pause / on ambient noise). Push-to-talk must keep going until the
                 // user releases Fn, so fold this segment in and restart — never end
                 // the session here, which previously left the HUD stuck.
-                NSLog("MacWhisper[Speech][DEBUG]: segment ended, not stopping -> restart")
+                NSLog("MacTranscribe[Speech][DEBUG]: segment ended, not stopping -> restart")
                 DispatchQueue.main.async {
                     guard self.isRunning, !self.isStopping else { return }
                     self.foldFinalizedSegment()
@@ -283,6 +302,29 @@ final class SpeechService {
                     self.request?.endAudio()
                     self.request = nil
                     self.stateLock.unlock()
+                    // Error-driven restarts (e.g. "no speech" timeouts during a
+                    // long leading silence) can leave the recognizer wedged so
+                    // every following task dies instantly and a long session
+                    // ends with an empty transcript. After a few in a row,
+                    // rebuild the recognizer itself.
+                    if endedWithError {
+                        self.consecutiveErrorRestarts += 1
+                        if self.consecutiveErrorRestarts % 3 == 0, let language = self.currentLanguage {
+                            Self.diag("rebuilding recognizer after \(self.consecutiveErrorRestarts) error restarts")
+                            self.recognizer = SFSpeechRecognizer(locale: language.locale)
+                        }
+                        // During a long pre-meeting silence the recognizer can
+                        // error out over and over; retrying instantly would spin
+                        // CPU for nothing (the audio backup keeps recording
+                        // regardless). Back off briefly, capped at 3 s so the
+                        // first words after the silence are still caught.
+                        let delay = min(Double(self.consecutiveErrorRestarts) * 0.5, 3.0)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            guard self.isRunning, !self.isStopping else { return }
+                            self.startRecognitionTask()
+                        }
+                        return
+                    }
                     self.startRecognitionTask()
                 }
             }
@@ -296,8 +338,10 @@ final class SpeechService {
         if !seg.isEmpty {
             finalizedPrefix = finalizedPrefix.isEmpty ? seg : finalizedPrefix + " " + seg
         }
+        let total = finalizedPrefix.count
         latestTranscript = ""
         stateLock.unlock()
+        Self.diag("segment folded segChars=\(seg.count) totalChars=\(total)")
     }
 
     /// Starts the repeating timer that auto-stops the session after a sustained
@@ -316,7 +360,7 @@ final class SpeechService {
     private func checkSilence() {
         guard isRunning, !isStopping, hasDetectedVoice else { return }
         guard Date().timeIntervalSince(lastVoiceAt) >= silenceTimeout else { return }
-        NSLog("MacWhisper[Speech]: silence auto-stop after \(silenceTimeout)s")
+        NSLog("MacTranscribe[Speech]: silence auto-stop after \(silenceTimeout)s")
         silenceTimer?.invalidate()
         silenceTimer = nil
         onAutoStop?()
@@ -327,11 +371,11 @@ final class SpeechService {
     func stop() {
         silenceTimer?.invalidate()
         silenceTimer = nil
-        NSLog("MacWhisper[Speech][DEBUG]: stop() called isRunning=\(isRunning) isStopping=\(isStopping) isStarting=\(isStarting) didFinish=\(didFinish)")
+        NSLog("MacTranscribe[Speech][DEBUG]: stop() called isRunning=\(isRunning) isStopping=\(isStopping) isStarting=\(isStarting) didFinish=\(didFinish)")
         // If we aren't actively running (e.g. the engine already torn down), still
         // deliver a final result exactly once so the HUD always dismisses.
         guard isRunning, !isStopping else {
-            NSLog("MacWhisper[Speech][DEBUG]: stop() -> early finish (not running)")
+            NSLog("MacTranscribe[Speech][DEBUG]: stop() -> early finish (not running)")
             finish(expectedGen: gen)
             return
         }
@@ -341,13 +385,13 @@ final class SpeechService {
         audioEngine?.stop()
         request?.endAudio()
         onLevel?(0)
-        NSLog("MacWhisper[Speech][DEBUG]: stop() -> endAudio sent, waiting for final callback")
+        NSLog("MacTranscribe[Speech][DEBUG]: stop() -> endAudio sent, waiting for final callback")
         // The recognition callback will fire finish(); guarantee it with a fallback.
         // Stored as a cancellable work item so cancel() can kill it when a new Fn
         // press supersedes this session mid-flush.
         let stopGen = gen
         let fallback = DispatchWorkItem { [weak self] in
-            NSLog("MacWhisper[Speech][DEBUG]: stop() fallback timer firing finish()")
+            NSLog("MacTranscribe[Speech][DEBUG]: stop() fallback timer firing finish()")
             self?.finish(expectedGen: stopGen)
         }
         stopFallback = fallback
@@ -360,7 +404,7 @@ final class SpeechService {
     /// generation so every stale async finish() — the fallback timer and any late
     /// recognizer callback — becomes a no-op, then tears down audio/resources.
     func cancel() {
-        NSLog("MacWhisper[Speech][DEBUG]: cancel() called isRunning=\(isRunning) isStopping=\(isStopping) isStarting=\(isStarting) didFinish=\(didFinish)")
+        NSLog("MacTranscribe[Speech][DEBUG]: cancel() called isRunning=\(isRunning) isStopping=\(isStopping) isStarting=\(isStarting) didFinish=\(didFinish)")
         gen &+= 1
         stopFallback?.cancel()
         stopFallback = nil
@@ -391,7 +435,7 @@ final class SpeechService {
         stateLock.lock()
         let transcript = combinedTranscript
         stateLock.unlock()
-        NSLog("MacWhisper[Speech][DEBUG]: finish() transcript.len=\(transcript.count) peak=\(sessionPeakLevel) detectedVoice=\(hasDetectedVoice) taskCount=\(recognitionTaskCount)")
+        NSLog("MacTranscribe[Speech][DEBUG]: finish() transcript.len=\(transcript.count) peak=\(sessionPeakLevel) detectedVoice=\(hasDetectedVoice) taskCount=\(recognitionTaskCount)")
         // Log only metadata, never the transcript text — speech content is PII and
         // the diag file lives in a world-readable location.
         Self.diag("session end peakLevel=\(sessionPeakLevel) detectedVoice=\(hasDetectedVoice) chars=\(transcript.count)")
@@ -452,9 +496,9 @@ final class SpeechService {
     /// Append a line to a diagnostics file so speech/VAD behavior can be inspected
     /// after a test run (unified-log NSLog args are redacted as <private>).
     private static let diagPath = "/tmp/macwhisper-diag.log"
-    private static func diag(_ message: String) {
+    static func diag(_ message: String) {
         let line = "\(Date()) \(message)\n"
-        NSLog("MacWhisper[Speech]: \(message)")
+        NSLog("MacTranscribe[Speech]: \(message)")
         guard let data = line.data(using: .utf8) else { return }
         if let handle = FileHandle(forWritingAtPath: diagPath) {
             handle.seekToEndOfFile()

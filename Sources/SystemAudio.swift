@@ -10,7 +10,7 @@ enum SystemAudio {
     /// inspected after a test run (NSLog string args are redacted as <private>).
     private static func diag(_ message: String) {
         let line = "\(Date()) [Audio] \(message)\n"
-        NSLog("MacWhisper[Audio]: \(message)")
+        NSLog("MacTranscribe[Audio]: \(message)")
         guard let data = line.data(using: .utf8) else { return }
         let path = "/tmp/macwhisper-diag.log"
         if let handle = FileHandle(forWritingAtPath: path) {
@@ -36,14 +36,14 @@ enum SystemAudio {
     static func muteOutput() {
         guard !didMute, let device = defaultOutputDeviceID() else { return }
         guard mutePropertyIsSettable(device) else {
-            NSLog("MacWhisper[Audio]: default output mute not settable; skipping")
+            NSLog("MacTranscribe[Audio]: default output mute not settable; skipping")
             return
         }
         guard currentMute(device) == false else { return } // already muted by user
         if setMute(device, muted: true) {
             didMute = true
             mutedDevice = device
-            NSLog("MacWhisper[Audio]: muted output device=\(device)")
+            NSLog("MacTranscribe[Audio]: muted output device=\(device)")
         }
     }
 
@@ -53,7 +53,7 @@ enum SystemAudio {
         defer { didMute = false; mutedDevice = nil }
         guard didMute, let device = mutedDevice else { return }
         _ = setMute(device, muted: false)
-        NSLog("MacWhisper[Audio]: restored output device=\(device)")
+        NSLog("MacTranscribe[Audio]: restored output device=\(device)")
     }
 
     /// Force the system default input to the Mac's built-in microphone. Capturing
@@ -143,7 +143,7 @@ enum SystemAudio {
         let size = UInt32(MemoryLayout<UInt32>.size)
         let status = AudioObjectSetPropertyData(device, &address, 0, nil, size, &value)
         if status != noErr {
-            NSLog("MacWhisper[Audio]: setMute(\(muted)) failed status=\(status)")
+            NSLog("MacTranscribe[Audio]: setMute(\(muted)) failed status=\(status)")
         }
         return status == noErr
     }
@@ -177,7 +177,7 @@ enum SystemAudio {
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, size, &value
         )
         if status != noErr {
-            NSLog("MacWhisper[Audio]: setDefaultInputDevice failed status=\(status)")
+            NSLog("MacTranscribe[Audio]: setDefaultInputDevice failed status=\(status)")
         }
         return status == noErr
     }

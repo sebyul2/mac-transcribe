@@ -1,5 +1,5 @@
-APP_NAME    = Mac Whisper
-EXEC_NAME   = MacWhisper
+APP_NAME    = Mac Transcribe
+EXEC_NAME   = MacTranscribe
 BUNDLE_ID   = com.solo.macwhisper
 CONFIG      = release
 SWIFT_BUILD = .build/$(CONFIG)
@@ -36,18 +36,18 @@ app: build
 	@cp Resources/Info.plist "$(CONTENTS)/Info.plist"
 	@/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" \
 		-c "Set :CFBundleVersion $(VERSION)" "$(CONTENTS)/Info.plist"
-	@cp public/assets/icon/MacWhisper.icns "$(RES_DIR)/MacWhisper.icns"
+	@cp public/assets/icon/MacTranscribe.icns "$(RES_DIR)/MacTranscribe.icns"
 	@echo "APPL????" > "$(CONTENTS)/PkgInfo"
 	@if security find-identity -p codesigning | grep -q "$(SIGN_ID)"; then \
 		echo "==> Codesigning with stable identity: $(SIGN_ID)"; \
 		codesign --force --deep --sign "$(SIGN_ID)" \
-			--entitlements MacWhisper.entitlements --options runtime "$(APP_BUNDLE)"; \
+			--entitlements MacTranscribe.entitlements --options runtime "$(APP_BUNDLE)"; \
 	else \
 		echo "==> Codesigning ad-hoc (permissions reset on each rebuild)"; \
 		echo "    Run 'make cert' once for stable, persistent permissions."; \
 		codesign --force --deep --sign - \
-			--entitlements MacWhisper.entitlements --options runtime "$(APP_BUNDLE)" || \
-		codesign --force --deep --sign - --entitlements MacWhisper.entitlements "$(APP_BUNDLE)"; \
+			--entitlements MacTranscribe.entitlements --options runtime "$(APP_BUNDLE)" || \
+		codesign --force --deep --sign - --entitlements MacTranscribe.entitlements "$(APP_BUNDLE)"; \
 	fi
 	@echo "==> Built $(APP_BUNDLE)"
 
