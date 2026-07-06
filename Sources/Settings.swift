@@ -54,8 +54,6 @@ final class Settings {
         static let longTriggerKeyUsage = "longTriggerKeyUsage"
         static let longTriggerKeyMods = "longTriggerKeyModifiers"
         static let meetingNotes = "meetingNotesEnabled"
-        static let interpreterTarget = "interpreterTargetLanguage"
-        static let liveTranslation = "liveTranslationEnabled"
         static let audioSource = "lockedAudioSource"
     }
 
@@ -181,20 +179,6 @@ final class Settings {
     var lockedAudioSourceIsSystem: Bool {
         get { defaults.string(forKey: Keys.audioSource) == "system" }
         set { defaults.set(newValue ? "system" : "mic", forKey: Keys.audioSource) }
-    }
-
-    /// When on, locked (long-form) sessions run as one-way interpretation:
-    /// captions show the live translation and no minutes are generated.
-    var liveTranslationEnabled: Bool {
-        get { defaults.bool(forKey: Keys.liveTranslation) }
-        set { defaults.set(newValue, forKey: Keys.liveTranslation) }
-    }
-
-    /// Target language for the one-way interpreter mode (English name, used
-    /// verbatim in the translation prompt).
-    var interpreterTargetLanguage: String {
-        get { defaults.string(forKey: Keys.interpreterTarget) ?? "English" }
-        set { defaults.set(newValue, forKey: Keys.interpreterTarget) }
     }
 
     /// Generate structured meeting notes with the LLM after a locked

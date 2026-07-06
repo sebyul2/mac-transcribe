@@ -1,6 +1,6 @@
 # Mac Whisper
 
-A macOS menu-bar app for voice: hold a key to dictate into any app, record long sessions like meetings to files, and get live translated captions while someone speaks — all running locally except the optional LLM polish.
+A macOS menu-bar app for voice: hold a key to dictate into any app, and record long sessions like meetings to files with live captions — all running locally except the optional LLM polish.
 
 Requires **macOS 26** (Tahoe) or later.
 
@@ -11,8 +11,6 @@ Requires **macOS 26** (Tahoe) or later.
 **Push-to-talk dictation.** Hold the trigger key (⌃Fn on the built-in keyboard, Left Ctrl by default on external keyboards — both configurable), speak, release. Your words are recognized on-device, optionally cleaned up by an LLM, and pasted into whatever app you were using.
 
 **Long-form recording.** Press the trigger + Shift to start a hands-free session for meetings and lectures. It uses macOS 26's long-form speech engine (SpeechAnalyzer), so hours-long sessions with long silences are fine. Everything is protected against loss: the raw audio is backed up to an `.m4a` as it records, and the partial transcript is autosaved every 2 seconds — a crash or force-quit costs you at most the last 2 seconds. Results land in `~/Documents/MacWhisper/`.
-
-**Live interpretation.** Turn on Live Translation and a long-form session becomes a one-way simultaneous interpreter: movie-style captions at the bottom of the screen show the translation as speech happens. Translation is two-tier — Apple's on-device translator drafts each line in ~100 ms (rendered dimmed), then the LLM's context-aware result replaces it in white. Utterances are split by real speech pauses detected in the recognizer's word timing, so different speakers don't run together, and translation context never crosses a speaker change.
 
 **Auto meeting notes.** Optionally have the LLM turn a finished recording into structured minutes (attendees, discussion, decisions, action items — with Mermaid diagrams where they help), saved as Markdown next to the transcript.
 
@@ -25,13 +23,13 @@ Requires **macOS 26** (Tahoe) or later.
 | Action | Built-in keyboard | External keyboard (default) |
 |---|---|---|
 | Dictate (hold) | ⌃Fn | Left Ctrl |
-| Long-form / interpreter (toggle) | ⌃⇧Fn | Left Ctrl + Left Shift |
+| Long-form recording (toggle) | ⌃⇧Fn | Left Ctrl + Left Shift |
 
 Both triggers are freely remappable — including full combos like ⌘⇧R — from **menu → Trigger Keys…**.
 
 ## LLM setup (optional)
 
-Everything works without an LLM; with one, dictation gets cleaned up, captions get quality translation, and meeting notes become available. Choose in **menu → LLM Refinement → Settings…**:
+Everything works without an LLM; with one, dictation gets cleaned up and meeting notes become available. Choose in **menu → LLM Refinement → Settings…**:
 
 - **ChatGPT subscription** — sign in with your ChatGPT Plus/Pro account (OAuth, no API key)
 - **OpenAI-compatible API** — any endpoint + key

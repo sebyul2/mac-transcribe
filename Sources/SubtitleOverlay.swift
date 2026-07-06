@@ -24,12 +24,10 @@ final class SubtitleOverlay {
     private let vPadding: CGFloat = 10
     private let bottomMargin: CGFloat = 14
     private let cornerRadius: CGFloat = 8
-    /// How many caption pieces (sentences / speaker turns) to show.
+    /// How many trailing sentences to show.
     var maxLines = 2
-    /// Hard cap on RENDERED lines — pieces wrap, so this exceeds maxLines.
-    /// The label must never clip the newest text: a turn line that wrapped to
-    /// an extra rendered line used to lose its final characters ("엘레나
-    /// 체이스" → "엘레나 체이").
+    /// Hard cap on RENDERED lines — sentences wrap, so this exceeds maxLines.
+    /// The label must never clip the newest text.
     private let renderedLineCap = 4
     /// Roughly the last caption-worth of text to show.
     private var tailLength: Int { maxLines * 70 }
@@ -198,36 +196,6 @@ final class SubtitleOverlay {
         let trimmed = current.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { result.append(trimmed) }
         return result
-    }
-
-    /// Interpreter-mode captions: styled runs concatenated verbatim — line
-    /// breaks arrive inside the run text, so a single line can mix a white
-    /// (committed) prefix with a dimmed still-moving remainder, hardening a
-    /// few words at a time like professional live captions.
-    func update(pieces: [(text: String, isFinal: Bool)]) {
-        guard armed else { return }
-        guard pieces.contains(where: { $0.text.contains(where: { $0.isLetter || $0.isNumber }) }) else { return }
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let styled = NSMutableAttributedString()
-        for piece in pieces {
-            styled.append(NSAttributedString(string: piece.text, attributes: [
-                .font: font,
-                .foregroundColor: piece.isFinal ? NSColor.white : NSColor.white.withAlphaComponent(0.55),
-                .paragraphStyle: paragraph,
-            ]))
-        }
-        // Only a content CHANGE resets the idle clock and re-reveals the
-        // panel — repeated emits of the same text must not resurrect a
-        // caption that idle-faded during a pause.
-        guard styled.string != lastContent else { return }
-        lastContent = styled.string
-        lastContentAt = Date()
-        flashGen &+= 1
-        textField.attributedStringValue = styled
-        layout(for: styled.string)
-        reveal()
     }
 
     /// Feeds the full accumulated transcript; the overlay shows only the tail,

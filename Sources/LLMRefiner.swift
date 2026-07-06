@@ -133,71 +133,6 @@ enum LLMRefiner {
         )
     }
 
-    /// Pre-flights the translation path when an interpreter session starts:
-    /// a throwaway request refreshes the OAuth token, loads the Codex
-    /// instructions cache, and opens the shared HTTP/2 connection — so the
-    /// first real sentence doesn't pay for any of it.
-    static func warmUpTranslation(to language: String) {
-        translate("Hello.", to: language) { _ in }
-    }
-
-    /// Fast sentence translation for the interpreter mode. Deliberately
-    /// lightweight — no glossary, tiny prompt, zero reasoning effort — because
-    /// latency matters more than polish here. The immediately preceding
-    /// sentence (and its translation, when known) is passed as context so
-    /// pronouns and terminology stay consistent across sentences.
-    /// `onPartial` (ChatGPT protocol only) delivers the accumulated output as
-    /// SSE deltas arrive, so captions can render the translation as it streams
-    /// instead of waiting ~1 s for completion. Called on a background queue.
-    static func translate(
-        _ text: String,
-        to language: String,
-        context: String? = nil,
-        contextTranslation: String? = nil,
-        isFragment: Bool = false,
-        previousTranslation: String? = nil,
-        onPartial: ((String) -> Void)? = nil,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        let settings = Settings.shared
-        var prompt = """
-        You are a simultaneous interpreter. Translate the user's text into \(language). \
-        Output ONLY the translation — no quotes, no notes, no commentary.
-        """
-        if let context {
-            prompt += "\n\nPreceding source (context only — do NOT include it in the output): \(context)"
-            if let contextTranslation {
-                prompt += "\nIts translation (match its tone and terminology): \(contextTranslation)"
-            }
-        }
-        if isFragment {
-            prompt += "\n\nThe text is an unfinished utterance still being spoken; translate it naturally as-is, without completing it."
-        }
-        if let previousTranslation {
-            prompt += """
-
-
-            Your previous translation of this same, still-growing utterance (shown live on screen): \
-            \(previousTranslation)
-            The source has grown since. Reuse the previous translation's wording VERBATIM as the \
-            beginning of your output and extend it to cover the new material. Only change an \
-            existing word if the source revision made it factually wrong — never rephrase for \
-            style, tone, or flow. A stable prefix matters more than elegance.
-            """
-        }
-        request(
-            text: text,
-            baseURL: settings.llmBaseURL,
-            apiKey: settings.llmAPIKey,
-            model: settings.llmModel,
-            proto: settings.llmProtocol,
-            systemPrompt: prompt,
-            reasoningEffort: "none",
-            onPartial: onPartial,
-            completion: completion
-        )
-    }
-
     /// Used by refinement, meeting notes, and the Settings "Test" button.
     static func request(
         text: String,
@@ -207,7 +142,6 @@ enum LLMRefiner {
         proto: LLMProtocol = .openai,
         systemPrompt: String? = nil,
         reasoningEffort: String = "low",
-        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let prompt = systemPrompt ?? self.systemPrompt
@@ -217,7 +151,7 @@ enum LLMRefiner {
         case .anthropic:
             requestAnthropic(text: text, baseURL: baseURL, apiKey: apiKey, model: model, systemPrompt: prompt, completion: completion)
         case .chatgpt:
-            requestChatGPT(text: text, model: model, systemPrompt: prompt, reasoningEffort: reasoningEffort, onPartial: onPartial, completion: completion)
+            requestChatGPT(text: text, model: model, systemPrompt: prompt, reasoningEffort: reasoningEffort, completion: completion)
         }
     }
 
@@ -232,7 +166,6 @@ enum LLMRefiner {
         model: String,
         systemPrompt: String,
         reasoningEffort: String,
-        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         ChatGPTOAuth.shared.withFreshToken { tokenResult in
@@ -248,7 +181,6 @@ enum LLMRefiner {
                     sendChatGPT(text: text, model: model, instructions: instructions,
                                 systemPrompt: systemPrompt, reasoningEffort: reasoningEffort,
                                 access: token.access, accountID: token.accountID,
-                                onPartial: onPartial,
                                 completion: completion)
                 }
             }
@@ -263,7 +195,6 @@ enum LLMRefiner {
         reasoningEffort: String,
         access: String,
         accountID: String,
-        onPartial: ((String) -> Void)? = nil,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let url = URL(string: "https://chatgpt.com/backend-api/codex/responses")!
@@ -299,15 +230,9 @@ enum LLMRefiner {
             return
         }
 
-        if let onPartial {
-            // Incremental delivery: the streamer retains itself through its
-            // URLSession delegate reference until the request finishes.
-            SSEStreamer.run(req, original: text, onPartial: onPartial, completion: completion)
-        } else {
-            send(req, original: text) { data in
-                parseSSEOutputText(data)
-            } completion: { completion($0) }
-        }
+        send(req, original: text) { data in
+            parseSSEOutputText(data)
+        } completion: { completion($0) }
     }
 
     /// Extracts the assistant's final text from a Responses-API SSE stream.
@@ -506,126 +431,5 @@ enum LLMRefiner {
         default:
             return nil
         }
-    }
-}
-
-/// Streams Responses-API SSE requests, delivering the accumulated output text
-/// after each delta so interpreter captions can render words as they arrive
-/// (~0.8 s to first word) instead of waiting for the full response (~2 s).
-///
-/// A single shared URLSession carries every stream so consecutive requests
-/// reuse the same HTTP/2 connection — a fresh session per request was paying
-/// a TLS handshake (100–300 ms) on top of each translation. Per-task state
-/// lives in `states`, touched only on the session's serial delegate queue.
-private final class SSEStreamer: NSObject, URLSessionDataDelegate {
-    private final class State {
-        var buffer = Data()
-        var deltas = ""
-        var finalText: String?
-        var statusCode = 0
-        var errorBody = Data()
-        let original: String
-        let onPartial: (String) -> Void
-        let completion: (Result<String, Error>) -> Void
-
-        init(original: String, onPartial: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
-            self.original = original
-            self.onPartial = onPartial
-            self.completion = completion
-        }
-    }
-
-    private static let shared = SSEStreamer()
-    private var states: [Int: State] = [:]
-    private lazy var session: URLSession = {
-        let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = 1
-        return URLSession(configuration: .default, delegate: self, delegateQueue: queue)
-    }()
-
-    static func run(
-        _ request: URLRequest,
-        original: String,
-        onPartial: @escaping (String) -> Void,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        shared.start(request, state: State(original: original, onPartial: onPartial, completion: completion))
-    }
-
-    private func start(_ request: URLRequest, state: State) {
-        let task = session.dataTask(with: request)
-        // Register on the delegate queue so the entry is in place before the
-        // task's first delegate callback (same serial queue) can run.
-        session.delegateQueue.addOperation { [weak self] in
-            self?.states[task.taskIdentifier] = state
-        }
-        task.resume()
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        dataTask: URLSessionDataTask,
-        didReceive response: URLResponse,
-        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
-    ) {
-        states[dataTask.taskIdentifier]?.statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-        completionHandler(.allow)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let state = states[dataTask.taskIdentifier] else { return }
-        guard (200..<300).contains(state.statusCode) else {
-            state.errorBody.append(data)
-            return
-        }
-        state.buffer.append(data)
-        while let newline = state.buffer.firstIndex(of: 0x0A) {
-            let line = String(data: state.buffer[state.buffer.startIndex..<newline], encoding: .utf8) ?? ""
-            state.buffer.removeSubrange(state.buffer.startIndex...newline)
-            handle(line: line.trimmingCharacters(in: .whitespaces), state: state)
-        }
-    }
-
-    private func handle(line: String, state: State) {
-        guard line.hasPrefix("data: ") else { return }
-        let payload = line.dropFirst(6)
-        guard payload != "[DONE]",
-              let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
-              let type = obj["type"] as? String else { return }
-        switch type {
-        case "response.output_text.delta":
-            if let delta = obj["delta"] as? String {
-                state.deltas += delta
-                state.onPartial(state.deltas)
-            }
-        case "response.completed", "response.done":
-            guard let resp = obj["response"] as? [String: Any],
-                  let output = resp["output"] as? [[String: Any]] else { return }
-            var texts: [String] = []
-            for item in output where (item["type"] as? String) == "message" {
-                for part in (item["content"] as? [[String: Any]] ?? [])
-                where (part["type"] as? String) == "output_text" {
-                    if let text = part["text"] as? String { texts.append(text) }
-                }
-            }
-            if !texts.isEmpty { state.finalText = texts.joined() }
-        default:
-            break
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let state = states.removeValue(forKey: task.taskIdentifier) else { return }
-        if let error {
-            state.completion(.failure(error))
-            return
-        }
-        guard (200..<300).contains(state.statusCode) else {
-            let detail = String(data: state.errorBody, encoding: .utf8) ?? ""
-            state.completion(.failure(LLMRefiner.RefineError(message: "HTTP \(state.statusCode): \(detail)")))
-            return
-        }
-        let content = (state.finalText ?? state.deltas).trimmingCharacters(in: .whitespacesAndNewlines)
-        state.completion(.success(content.isEmpty ? state.original : content))
     }
 }
