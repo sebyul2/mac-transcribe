@@ -4,7 +4,7 @@ A macOS menu-bar app for voice: hold a key to dictate into any app, and record l
 
 Requires **macOS 26** (Tahoe) or later.
 
-[**Download MacTranscribe.dmg**](https://github.com/sebyul2/mac-transcribe/raw/main/build/MacTranscribe.dmg)
+[**Download MacTranscribe.dmg**](https://github.com/sebyul2/mac-transcribe/releases/latest/download/MacTranscribe.dmg)
 
 ## What it does
 
