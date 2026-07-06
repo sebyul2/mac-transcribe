@@ -192,7 +192,7 @@ final class FnKeyMonitor {
             }
         }
 
-        NSLog("MacWhisper[Fn]: start opened=\(opened) inputMonitoring=\(hasInputMonitoringAccess)")
+        NSLog("MacTranscribe[Fn]: start opened=\(opened) inputMonitoring=\(hasInputMonitoringAccess)")
         return opened && hasInputMonitoringAccess
     }
 
@@ -242,7 +242,7 @@ final class FnKeyMonitor {
             if pressed != longDown {
                 longDown = pressed
                 if pressed, Self.modifiersSatisfied(lt) {
-                    NSLog("MacWhisper[Fn]: LongTrigger DOWN (flags)")
+                    NSLog("MacTranscribe[Fn]: LongTrigger DOWN (flags)")
                     DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
                 }
             }
@@ -292,7 +292,7 @@ final class FnKeyMonitor {
             guard pressed != longDown else { return }
             longDown = pressed
             if pressed, Self.modifiersSatisfied(lt) {
-                NSLog("MacWhisper[Fn]: LongTrigger DOWN")
+                NSLog("MacTranscribe[Fn]: LongTrigger DOWN")
                 DispatchQueue.main.async { [weak self] in self?.onLongTriggerDown?() }
             }
             return
@@ -337,7 +337,7 @@ final class FnKeyMonitor {
         SpeechService.diag("updateTrigger \(label) pressed=\(pressed) before=\(before) after=\(after)")
         guard before != after else { return }
         let at = Date()
-        NSLog("MacWhisper[Fn]: \(label) \(pressed ? "DOWN" : "UP")")
+        NSLog("MacTranscribe[Fn]: \(label) \(pressed ? "DOWN" : "UP")")
         DispatchQueue.main.async { [weak self] in
             if after { self?.onFnDown?(at, source) } else { self?.onFnUp?(at) }
         }

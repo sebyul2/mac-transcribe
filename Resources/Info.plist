@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Mac Whisper</string>
+    <string>Mac Transcribe</string>
     <key>CFBundleDisplayName</key>
-    <string>Mac Whisper</string>
+    <string>Mac Transcribe</string>
     <key>CFBundleIdentifier</key>
     <string>com.solo.macwhisper</string>
     <key>CFBundleVersion</key>
@@ -15,9 +15,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>MacWhisper</string>
+    <string>MacTranscribe</string>
     <key>CFBundleIconFile</key>
-    <string>MacWhisper</string>
+    <string>MacTranscribe</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>LSUIElement</key>
@@ -25,8 +25,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Mac Whisper needs microphone access to transcribe your speech.</string>
+    <string>Mac Transcribe needs microphone access to transcribe your speech.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Mac Whisper uses speech recognition to convert your speech to text.</string>
+    <string>Mac Transcribe uses speech recognition to convert your speech to text.</string>
 </dict>
 </plist>

@@ -188,7 +188,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let url = Settings.shared.glossaryURL
         if !FileManager.default.fileExists(atPath: url.path) {
             let template = """
-            # Mac Whisper glossary — one term per line.
+            # Mac Transcribe glossary — one term per line.
             # Lines starting with # are comments.
             # Map a frequent mis-transcription with:  wrong -> right
             # Examples:

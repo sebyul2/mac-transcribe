@@ -164,12 +164,12 @@ final class ChatGPTOAuth {
 
         guard let code, state == pendingState else {
             respond(connection, status: "400 Bad Request",
-                    body: "<h2>Sign-in failed</h2><p>Missing code or state mismatch. Return to Mac Whisper and try again.</p>")
+                    body: "<h2>Sign-in failed</h2><p>Missing code or state mismatch. Return to Mac Transcribe and try again.</p>")
             finishSignIn(.failure(AuthError(message: "OAuth callback missing code or state mismatch")))
             return
         }
         respond(connection, status: "200 OK",
-                body: "<h2>Signed in to Mac Whisper</h2><p>You can close this window and return to the app.</p>")
+                body: "<h2>Signed in to Mac Transcribe</h2><p>You can close this window and return to the app.</p>")
 
         let verifier = pendingVerifier ?? ""
         requestToken(params: [

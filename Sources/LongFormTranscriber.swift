@@ -476,7 +476,7 @@ final class LongFormTranscriber {
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw NSError(domain: "MacWhisper", code: 1,
+            throw NSError(domain: "MacTranscribe", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "invalid input format"])
         }
         var boundDevice: AudioDeviceID = 0
@@ -506,7 +506,7 @@ final class LongFormTranscriber {
             // A silent fallback to unconverted buffers would feed the analyzer
             // a format it did not ask for — fail loudly instead.
             guard let conv = AVAudioConverter(from: format, to: fmt) else {
-                throw NSError(domain: "MacWhisper", code: 2, userInfo: [
+                throw NSError(domain: "MacTranscribe", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "cannot convert \(format.sampleRate)Hz to analyzer format \(fmt.sampleRate)Hz"])
             }
             stateLock.lock()
@@ -590,7 +590,7 @@ final class LongFormTranscriber {
     private func startSystemCapture() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
-            throw NSError(domain: "MacWhisper", code: 3,
+            throw NSError(domain: "MacTranscribe", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "no display for system-audio capture"])
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])

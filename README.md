@@ -1,16 +1,16 @@
-# Mac Whisper
+# Mac Transcribe
 
 A macOS menu-bar app for voice: hold a key to dictate into any app, and record long sessions like meetings to files with live captions — all running locally except the optional LLM polish.
 
 Requires **macOS 26** (Tahoe) or later.
 
-[**Download MacWhisper.dmg**](https://github.com/sebyul2/mac-transcribe/raw/main/build/MacWhisper.dmg)
+[**Download MacTranscribe.dmg**](https://github.com/sebyul2/mac-transcribe/raw/main/build/MacTranscribe.dmg)
 
 ## What it does
 
 **Push-to-talk dictation.** Hold the trigger key (⌃Fn on the built-in keyboard, Left Ctrl by default on external keyboards — both configurable), speak, release. Your words are recognized on-device, optionally cleaned up by an LLM, and pasted into whatever app you were using.
 
-**Long-form recording.** Press the trigger + Shift to start a hands-free session for meetings and lectures. It uses macOS 26's long-form speech engine (SpeechAnalyzer), so hours-long sessions with long silences are fine. Everything is protected against loss: the raw audio is backed up to an `.m4a` as it records, and the partial transcript is autosaved every 2 seconds — a crash or force-quit costs you at most the last 2 seconds. Results land in `~/Documents/MacWhisper/`.
+**Long-form recording.** Press the trigger + Shift to start a hands-free session for meetings and lectures. It uses macOS 26's long-form speech engine (SpeechAnalyzer), so hours-long sessions with long silences are fine. Everything is protected against loss: the raw audio is backed up to an `.m4a` as it records, and the partial transcript is autosaved every 2 seconds — a crash or force-quit costs you at most the last 2 seconds. Results land in `~/Documents/MacTranscribe/`.
 
 **Auto meeting notes.** Optionally have the LLM turn a finished recording into structured minutes (attendees, discussion, decisions, action items — with Mermaid diagrams where they help), saved as Markdown next to the transcript.
 
@@ -44,19 +44,19 @@ The app asks for what each feature needs: **Microphone** and **Speech Recognitio
 Download the DMG above, or build from source:
 
 ```sh
-make app      # builds build/Mac Whisper.app
-make dmg      # packages build/MacWhisper.dmg
+make app      # builds build/Mac Transcribe.app
+make dmg      # packages build/MacTranscribe.dmg
 ```
 
-Copy `build/Mac Whisper.app` to `/Applications`.
+Copy `build/Mac Transcribe.app` to `/Applications`.
 
 ## Files
 
 | Path | What |
 |---|---|
-| `~/Documents/MacWhisper/transcript-*.txt` | session transcripts (one line per utterance) |
-| `~/Documents/MacWhisper/recording-*.m4a` | raw audio backups |
-| `~/Documents/MacWhisper/notes-*.md` | generated meeting minutes |
+| `~/Documents/MacTranscribe/transcript-*.txt` | session transcripts (one line per utterance) |
+| `~/Documents/MacTranscribe/recording-*.m4a` | raw audio backups |
+| `~/Documents/MacTranscribe/notes-*.md` | generated meeting minutes |
 
 ## Credits
 

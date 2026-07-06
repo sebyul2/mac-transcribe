@@ -67,9 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Remember the item's menu-bar position across launches.
-        statusItem.autosaveName = "MacWhisperStatusItem"
+        statusItem.autosaveName = "MacTranscribeStatusItem"
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Mac Whisper")
+            button.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Mac Transcribe")
             button.image?.isTemplate = true
         }
         rebuildMenu()
@@ -77,12 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (an x past the notch's left edge means macOS hid it behind the notch).
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self, let button = self.statusItem.button, let window = button.window else {
-                NSLog("MacWhisper[App]: status item has no window (not visible)")
+                NSLog("MacTranscribe[App]: status item has no window (not visible)")
                 return
             }
             let frame = window.frame
             let screen = NSScreen.main?.frame ?? .zero
-            NSLog("MacWhisper[App]: status item frame=\(frame) screen=\(screen) visible=\(self.statusItem.isVisible)")
+            NSLog("MacTranscribe[App]: status item frame=\(frame) screen=\(screen) visible=\(self.statusItem.isVisible)")
             let line = "\(Date()) statusItem x=\(Int(frame.origin.x)) y=\(Int(frame.origin.y)) w=\(Int(frame.width)) screenW=\(Int(screen.width)) visible=\(self.statusItem.isVisible)\n"
             if let data = line.data(using: .utf8) {
                 if let handle = FileHandle(forWritingAtPath: "/tmp/macwhisper-diag.log") {
@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // Locked (hands-free) recording: double-tap Fn or use this item; the
-        // transcript is saved to ~/Documents/MacWhisper instead of pasted.
+        // transcript is saved to ~/Documents/MacTranscribe instead of pasted.
         let lockTitle = isLockedRecording
             ? "Stop Locked Recording & Save"
             : "Start Locked Recording"
@@ -190,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // capture is visible even with no HUD and the window closed.
         if let button = statusItem.button {
             let symbol = isLockedRecording ? "record.circle" : "mic.fill"
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Mac Whisper")
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Mac Transcribe")
             button.image?.isTemplate = true
         }
 
@@ -421,7 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnHoldAction = .lockToggle // sentinel: nothing more may start this hold
         // A locked recording must survive Fn combos untouched.
         guard !isLockedRecording, wasPushToTalk, isRecording || isFinishing else { return }
-        NSLog("MacWhisper[App]: Fn combo detected — canceling push-to-talk")
+        NSLog("MacTranscribe[App]: Fn combo detected — canceling push-to-talk")
         SpeechService.diag("fn combo -> push-to-talk canceled")
         speech.cancel()
         isRecording = false
@@ -448,7 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isLockedRecording else { return }
         subtitles.maxLines = 2
         longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
-        NSLog("MacWhisper[App]: locked recording started")
+        NSLog("MacTranscribe[App]: locked recording started")
         // Tear down the short push-to-talk session left over from the
         // double-tap's first tap; the locked session uses the long-form engine.
         // cancel() suppresses that session's onFinished on purpose, which also
@@ -476,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastAutosaveAt = .distantPast
         sleepActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleSystemSleepDisabled, .userInitiated],
-            reason: "MacWhisper locked recording")
+            reason: "MacTranscribe locked recording")
         // Note: unlike push-to-talk, locked recording does NOT mute the system
         // output — meeting audio must stay audible, and the mute was silencing
         // the start-feedback sound itself.
@@ -499,7 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopLockedRecording() {
         guard isLockedRecording, !lockStopping else { return }
         lockStopping = true
-        NSLog("MacWhisper[App]: locked recording stopping")
+        NSLog("MacTranscribe[App]: locked recording stopping")
         NSSound(named: "Bottle")?.play()
         subtitles.flashStatus("■ 녹음 종료 — 저장 중…")
         transcriptWindow.setStatus("Finishing…")
@@ -523,7 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startRecording() {
-        NSLog("MacWhisper[App]: startRecording isRecording=\(isRecording) isFinishing=\(isFinishing)")
+        NSLog("MacTranscribe[App]: startRecording isRecording=\(isRecording) isFinishing=\(isFinishing)")
         // A rapid Fn press during the previous session's flush window (between
         // stop() and the recognizer's onFinished) used to be rejected by the
         // isFinishing guard, dropping the press — and the stale session's
@@ -533,7 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // every stale async finish() via the generation token, so the late
         // onFinished from the old session can't tear down the new one.
         if isFinishing {
-            NSLog("MacWhisper[App]: superseding finishing session")
+            NSLog("MacTranscribe[App]: superseding finishing session")
             speech.cancel()
             isFinishing = false
         }
@@ -550,7 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecording() {
-        NSLog("MacWhisper[App]: stopRecording isRecording=\(isRecording)")
+        NSLog("MacTranscribe[App]: stopRecording isRecording=\(isRecording)")
         SystemAudio.restoreOutput()
         guard isRecording else { return }
         isRecording = false
@@ -602,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static var transcriptsDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MacWhisper", isDirectory: true)
+            .appendingPathComponent("MacTranscribe", isDirectory: true)
     }
 
     private static func fileTimestamp() -> String {
@@ -641,7 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (glossary included in the prompt) and saves them as notes-<stamp>.md.
     /// Failures only log — the transcript file is already safe on disk.
     private func generateMeetingNotes(from transcript: String, stamp: String, in dir: URL) {
-        NSLog("MacWhisper[App]: generating meeting notes chars=\(transcript.count)")
+        NSLog("MacTranscribe[App]: generating meeting notes chars=\(transcript.count)")
         LLMRefiner.generateMeetingNotes(from: transcript, meetingDate: Self.meetingDateString(from: stamp)) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -650,15 +650,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let url = dir.appendingPathComponent("notes-\(stamp).md")
                     do {
                         try notes.write(to: url, atomically: true, encoding: .utf8)
-                        NSLog("MacWhisper[App]: meeting notes saved chars=\(notes.count)")
+                        NSLog("MacTranscribe[App]: meeting notes saved chars=\(notes.count)")
                         SpeechService.diag("meeting notes saved -> \(url.lastPathComponent)")
                         self.transcriptWindow.setStatus("Meeting notes saved: \(url.lastPathComponent)")
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     } catch {
-                        NSLog("MacWhisper[App]: failed to save meeting notes: \(error)")
+                        NSLog("MacTranscribe[App]: failed to save meeting notes: \(error)")
                     }
                 case .failure(let error):
-                    NSLog("MacWhisper[App]: meeting notes failed: \(error.localizedDescription)")
+                    NSLog("MacTranscribe[App]: meeting notes failed: \(error.localizedDescription)")
                     SpeechService.diag("meeting notes FAILED: \(error.localizedDescription)")
                     self.transcriptWindow.setStatus("Meeting notes failed — transcript is saved")
                 }
@@ -672,7 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Long transcripts are refined in chunks to stay inside response limits.
     private func refineTranscriptFile(_ text: String, at url: URL) {
         let chunks = Self.chunkForRefinement(text, limit: 3000)
-        NSLog("MacWhisper[App]: refining transcript in \(chunks.count) chunk(s)")
+        NSLog("MacTranscribe[App]: refining transcript in \(chunks.count) chunk(s)")
         var refined: [String] = []
         var anySuccess = false
         func processNext(_ index: Int) {
@@ -681,7 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let output = refined.joined(separator: " ")
                 if Self.isMeaningfulTranscript(output) {
                     try? output.write(to: url, atomically: true, encoding: .utf8)
-                    NSLog("MacWhisper[App]: refined transcript written chars=\(output.count)")
+                    NSLog("MacTranscribe[App]: refined transcript written chars=\(output.count)")
                 }
                 return
             }
@@ -692,7 +692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         refined.append(text)
                         anySuccess = true
                     case .failure(let error):
-                        NSLog("MacWhisper[App]: refine chunk \(index) failed: \(error.localizedDescription)")
+                        NSLog("MacTranscribe[App]: refine chunk \(index) failed: \(error.localizedDescription)")
                         refined.append(chunks[index])
                     }
                     processNext(index + 1)
@@ -743,7 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let autosaved = try? String(contentsOf: autosaveURL, encoding: .utf8) {
             let trimmed = autosaved.trimmingCharacters(in: .whitespacesAndNewlines)
             if Self.isMeaningfulTranscript(trimmed) {
-                NSLog("MacWhisper[App]: final transcript empty; recovered \(trimmed.count) chars from autosave")
+                NSLog("MacTranscribe[App]: final transcript empty; recovered \(trimmed.count) chars from autosave")
                 final = trimmed
             }
         }
@@ -756,7 +756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // be able to lose the capture.
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 try final.write(to: url, atomically: true, encoding: .utf8)
-                NSLog("MacWhisper[App]: transcript saved chars=\(final.count)")
+                NSLog("MacTranscribe[App]: transcript saved chars=\(final.count)")
                 if let autosaveURL { try? FileManager.default.removeItem(at: autosaveURL) }
                 NSWorkspace.shared.activateFileViewerSelecting([url])
                 // Then refine in place when LLM refinement is configured.
@@ -773,7 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     generateMeetingNotes(from: final, stamp: stamp, in: dir)
                 }
             } catch {
-                NSLog("MacWhisper[App]: failed to save transcript: \(error)")
+                NSLog("MacTranscribe[App]: failed to save transcript: \(error)")
             }
             return
         }
@@ -785,13 +785,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Speech happened but transcription produced nothing usable: keep
             // and reveal the audio so the capture is never silently lost.
             if FileManager.default.fileExists(atPath: audioURL.path) {
-                NSLog("MacWhisper[App]: transcript empty despite voice (peak=\(longForm.sessionPeakLevel)); revealing audio backup")
+                NSLog("MacTranscribe[App]: transcript empty despite voice (peak=\(longForm.sessionPeakLevel)); revealing audio backup")
                 transcriptWindow.setStatus("No transcript — audio backup kept (\(audioURL.lastPathComponent))")
                 NSWorkspace.shared.activateFileViewerSelecting([audioURL])
             }
         } else {
             // Silence-only session: nothing worth keeping.
-            NSLog("MacWhisper[App]: silent locked session discarded (peak=\(longForm.sessionPeakLevel))")
+            NSLog("MacTranscribe[App]: silent locked session discarded (peak=\(longForm.sessionPeakLevel))")
             transcriptWindow.setStatus("No speech detected — nothing saved")
             try? FileManager.default.removeItem(at: audioURL)
         }

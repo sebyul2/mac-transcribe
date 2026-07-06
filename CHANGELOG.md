@@ -40,7 +40,7 @@
 
 - 긴 발화 녹음 모드 추가 (macOS 26 이상 지원)
   - Ctrl+Shift+Fn으로 시작/종료하는 녹음 모드
-  - 결과는 파일로 저장됨: `~/Documents/MacWhisper/transcript-날짜.txt`
+  - 결과는 파일로 저장됨: `~/Documents/MacTranscribe/transcript-날짜.txt`
   - macOS 26의 **장시간 전사 엔진(SpeechAnalyzer)** 을 사용하여, 긴 무음이 있어도 안정적으로 동작
   - 유실 방지: 원본 오디오 백업(`recording-날짜.m4a`) + 부분 전사 2초마다 자동 저장
   - 실시간 자막 오버레이(화면 하단, 최대 2줄, 마우스오버 시 닫기)와 전사 창(메뉴 → Transcript Window…) 제공

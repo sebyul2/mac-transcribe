@@ -20,11 +20,11 @@ final class TranscriptWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Mac Whisper Transcript"
+        window.title = "Mac Transcribe Transcript"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 340, height: 240)
         // Remember the user's size/position across sessions and launches.
-        window.setFrameAutosaveName("MacWhisperTranscriptWindow")
+        window.setFrameAutosaveName("MacTranscribeTranscriptWindow")
         self.init(window: window)
         buildUI()
     }

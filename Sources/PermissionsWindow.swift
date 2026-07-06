@@ -4,7 +4,7 @@ import Speech
 import IOKit.hid
 import ApplicationServices
 
-/// A single combined window that lists every permission Mac Whisper needs, shows
+/// A single combined window that lists every permission Mac Transcribe needs, shows
 /// whether each is granted, and offers a button to grant / open the relevant
 /// Settings pane. This replaces the scattered one-off permission prompts.
 final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
@@ -31,40 +31,40 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
                 switch self {
                 case .microphone: return "Capture your voice."
                 case .speech: return "Transcribe speech to text."
-                case .inputMonitoring: return "Detect the Fn key. Toggle Mac Whisper on in the list."
-                case .accessibility: return "Insert text into other apps. Toggle Mac Whisper on in the list."
+                case .inputMonitoring: return "Detect the Fn key. Toggle Mac Transcribe on in the list."
+                case .accessibility: return "Insert text into other apps. Toggle Mac Transcribe on in the list."
                 case .screenRecording: return "Capture system audio (what the Mac plays). Optional — only for the System Audio source."
                 }
             case .korean:
                 switch self {
                 case .microphone: return "음성을 녹음합니다."
                 case .speech: return "음성을 텍스트로 변환합니다."
-                case .inputMonitoring: return "Fn 키 입력을 감지합니다. 목록에서 Mac Whisper를 켜주세요."
-                case .accessibility: return "다른 앱에 텍스트를 입력합니다. 목록에서 Mac Whisper를 켜주세요."
+                case .inputMonitoring: return "Fn 키 입력을 감지합니다. 목록에서 Mac Transcribe를 켜주세요."
+                case .accessibility: return "다른 앱에 텍스트를 입력합니다. 목록에서 Mac Transcribe를 켜주세요."
                 case .screenRecording: return "시스템 오디오(맥이 재생하는 소리)를 캡처합니다. System Audio 입력을 쓸 때만 필요한 선택 권한입니다."
                 }
             case .simplifiedChinese:
                 switch self {
                 case .microphone: return "录制您的语音。"
                 case .speech: return "将语音转换为文本。"
-                case .inputMonitoring: return "检测 Fn 键。在列表中打开 Mac Whisper 的开关。"
-                case .accessibility: return "将文本插入其他应用。在列表中打开 Mac Whisper 的开关。"
+                case .inputMonitoring: return "检测 Fn 键。在列表中打开 Mac Transcribe 的开关。"
+                case .accessibility: return "将文本插入其他应用。在列表中打开 Mac Transcribe 的开关。"
                 case .screenRecording: return "捕获系统音频（Mac 播放的声音）。可选 — 仅在使用系统音频输入时需要。"
                 }
             case .traditionalChinese:
                 switch self {
                 case .microphone: return "錄製您的語音。"
                 case .speech: return "將語音轉換為文字。"
-                case .inputMonitoring: return "偵測 Fn 鍵。在列表中開啟 Mac Whisper。"
-                case .accessibility: return "將文字插入其他應用程式。在列表中開啟 Mac Whisper。"
+                case .inputMonitoring: return "偵測 Fn 鍵。在列表中開啟 Mac Transcribe。"
+                case .accessibility: return "將文字插入其他應用程式。在列表中開啟 Mac Transcribe。"
                 case .screenRecording: return "擷取系統音訊（Mac 播放的聲音）。可選 — 僅在使用系統音訊輸入時需要。"
                 }
             case .japanese:
                 switch self {
                 case .microphone: return "音声を録音します。"
                 case .speech: return "音声をテキストに変換します。"
-                case .inputMonitoring: return "Fn キーを検出します。リストで Mac Whisper をオンにしてください。"
-                case .accessibility: return "他のアプリにテキストを入力します。リストで Mac Whisper をオンにしてください。"
+                case .inputMonitoring: return "Fn キーを検出します。リストで Mac Transcribe をオンにしてください。"
+                case .accessibility: return "他のアプリにテキストを入力します。リストで Mac Transcribe をオンにしてください。"
                 case .screenRecording: return "システムオーディオ（Mac が再生する音）をキャプチャします。System Audio 入力を使う場合のみ必要なオプション権限です。"
                 }
             }
@@ -138,24 +138,24 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
     private static func headerText(_ lang: RecognitionLanguage, allGranted: Bool) -> String {
         if allGranted {
             switch lang {
-            case .english: return "All set — Mac Whisper is ready to use."
-            case .korean: return "모두 준비되었습니다 — Mac Whisper를 사용할 수 있습니다."
-            case .simplifiedChinese: return "全部就绪 — Mac Whisper 已可使用。"
-            case .traditionalChinese: return "全部就緒 — Mac Whisper 已可使用。"
-            case .japanese: return "準備完了 — Mac Whisper をご利用いただけます。"
+            case .english: return "All set — Mac Transcribe is ready to use."
+            case .korean: return "모두 준비되었습니다 — Mac Transcribe를 사용할 수 있습니다."
+            case .simplifiedChinese: return "全部就绪 — Mac Transcribe 已可使用。"
+            case .traditionalChinese: return "全部就緒 — Mac Transcribe 已可使用。"
+            case .japanese: return "準備完了 — Mac Transcribe をご利用いただけます。"
             }
         }
         switch lang {
         case .english:
-            return "Mac Whisper needs these to listen for the Fn key and insert your dictated text.\nThey're only used while you're dictating. Tap Allow on each, then toggle Mac Whisper on in System Settings."
+            return "Mac Transcribe needs these to listen for the Fn key and insert your dictated text.\nThey're only used while you're dictating. Tap Allow on each, then toggle Mac Transcribe on in System Settings."
         case .korean:
-            return "Mac Whisper가 Fn 키를 감지하고 받아쓴 텍스트를 입력하려면 이 권한들이 필요합니다.\n받아쓰는 동안에만 사용됩니다. 각 항목에서 Allow를 누른 뒤 시스템 설정에서 Mac Whisper를 켜주세요."
+            return "Mac Transcribe가 Fn 키를 감지하고 받아쓴 텍스트를 입력하려면 이 권한들이 필요합니다.\n받아쓰는 동안에만 사용됩니다. 각 항목에서 Allow를 누른 뒤 시스템 설정에서 Mac Transcribe를 켜주세요."
         case .simplifiedChinese:
-            return "Mac Whisper 需要这些权限来检测 Fn 键并插入听写文字。\n仅在听写时使用。逐项点按 Allow，然后在系统设置中打开 Mac Whisper。"
+            return "Mac Transcribe 需要这些权限来检测 Fn 键并插入听写文字。\n仅在听写时使用。逐项点按 Allow，然后在系统设置中打开 Mac Transcribe。"
         case .traditionalChinese:
-            return "Mac Whisper 需要這些權限來偵測 Fn 鍵並插入聽寫文字。\n僅在聽寫時使用。逐項點按 Allow，然後在系統設定中開啟 Mac Whisper。"
+            return "Mac Transcribe 需要這些權限來偵測 Fn 鍵並插入聽寫文字。\n僅在聽寫時使用。逐項點按 Allow，然後在系統設定中開啟 Mac Transcribe。"
         case .japanese:
-            return "Mac Whisper が Fn キーを検出し、ディクテーション文字を入力するにはこれらの権限が必要です。\nディクテーション中のみ使用されます。各項目で Allow を押し、システム設定で Mac Whisper をオンにしてください。"
+            return "Mac Transcribe が Fn キーを検出し、ディクテーション文字を入力するにはこれらの権限が必要です。\nディクテーション中のみ使用されます。各項目で Allow を押し、システム設定で Mac Transcribe をオンにしてください。"
         }
     }
 
@@ -166,7 +166,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Mac Whisper Permissions"
+        window.title = "Mac Transcribe Permissions"
         window.isReleasedWhenClosed = false
         self.init(window: window)
         window.delegate = self
@@ -300,7 +300,7 @@ final class PermissionsWindowController: NSWindowController, NSWindowDelegate {
         permission.registerWithTCCIfNeeded()
 
         // Let TCC finish adding the app before System Settings loads the pane,
-        // otherwise the list can open before "Mac Whisper" appears.
+        // otherwise the list can open before "Mac Transcribe" appears.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.openSettings(permission)
         }
