@@ -642,6 +642,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Failures only log — the transcript file is already safe on disk.
     private func generateMeetingNotes(from transcript: String, stamp: String, in dir: URL) {
         NSLog("MacTranscribe[App]: generating meeting notes chars=\(transcript.count)")
+        SpeechService.diag("meeting notes generating chars=\(transcript.count)")
+        // Minutes for a long meeting take a few minutes to write; without a
+        // visible status users read the wait as "notes were never made" (and
+        // may quit the app mid-generation, which really does lose them).
+        transcriptWindow.setStatus("Generating meeting notes… (takes a few minutes; keep the app running)")
         LLMRefiner.generateMeetingNotes(from: transcript, meetingDate: Self.meetingDateString(from: stamp)) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
