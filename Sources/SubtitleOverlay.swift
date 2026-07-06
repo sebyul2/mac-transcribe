@@ -67,6 +67,10 @@ final class SubtitleOverlay {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         container = HoverView(frame: rect)
+        // Layer-backed all the way down: without this, resizing the panel as
+        // captions grow (one line -> two) left the previous frame's pixels
+        // behind, so old and new box/text rendered on top of each other.
+        container.wantsLayer = true
         panel.contentView = container
 
         captionBox.wantsLayer = true
@@ -143,7 +147,10 @@ final class SubtitleOverlay {
                 ctx.duration = 0.4
                 self.panel.animator().alphaValue = 0
             }, completionHandler: { [weak self] in
-                guard let self, self.armed else { return }
+                guard let self, self.armed,
+                      // New content may have arrived (and re-revealed the
+                      // panel) while the fade ran — don't yank it back out.
+                      Date().timeIntervalSince(self.lastContentAt) >= self.idleFadeAfter else { return }
                 self.panel.orderOut(nil)
             })
         }
@@ -274,8 +281,10 @@ final class SubtitleOverlay {
         // Center the caption box (not the oversized panel) on screen.
         frame.origin.x = vis.midX - boxWidth / 2
         frame.origin.y = vis.minY + bottomMargin
-        panel.setFrame(frame, display: true)
 
+        // Subview frames FIRST, then the panel frame with display:true — the
+        // reverse order redrew before the subviews moved, leaving the old
+        // caption ghosted under the new one whenever the box changed size.
         captionBox.frame = NSRect(x: 0, y: 0, width: boxWidth, height: boxHeight)
         textField.frame = NSRect(x: hPadding, y: vPadding, width: textWidth, height: textHeight)
         // Close button centered exactly on the box's top-right corner point.
@@ -285,6 +294,8 @@ final class SubtitleOverlay {
             width: closeSize,
             height: closeSize
         )
+        panel.setFrame(frame, display: true)
+        container.needsDisplay = true
     }
 
     /// Container that reports mouse hover for the close-button reveal.
