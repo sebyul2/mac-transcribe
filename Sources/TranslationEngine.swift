@@ -1,262 +1,405 @@
 import Foundation
 
-/// Live translation for locked sessions.
+/// Live translation for locked (interpreter) sessions.
 ///
-/// The design is the published, production-proven recipe for streaming
-/// machine translation over a translator that cannot decode incrementally
-/// (an LLM API):
+/// ## Algorithm
 ///
-///  * **Re-translation** (Arivazhagan et al. 2020 — the approach Google's
-///    streaming translation shipped): every request translates the current
-///    full text of ONE utterance from scratch. Requests are stateless, so a
-///    slow or lost response can never corrupt anything — the next response
-///    simply supersedes it. While a request is in flight, source changes only
-///    mark the utterance dirty; at most one request runs and at most one is
-///    pending (conflation), so the request rate self-paces to the model's
-///    latency.
-///  * **Local agreement** (Liu et al. 2020), with the trailing word masked:
-///    the prefix that two consecutive hypotheses agree on is rendered white
-///    (committed), the rest dimmed. Commitment is monotonic within an
-///    utterance, so a word that turned white never flickers back.
+/// Two published techniques, composed:
 ///
-/// Segmentation is not this engine's job: the transcriber already emits one
-/// utterance per line (see LongFormTranscriber). The LAST line is the open
-/// utterance — still being spoken, re-translated on every change; earlier
-/// lines are sealed. Sealing hands the open hypothesis over as the line's
-/// PROVISIONAL translation (so nothing on screen ever regresses to source
-/// text), and the definitive pass then re-translates the finished sentence
-/// fresh — free of the verbatim-reuse chaining that keeps live hypotheses
-/// stable but locks in wordings chosen when the sentence was half-spoken.
-/// Quality comes from that pass; the live loop only keeps the screen
-/// current. A sealed utterance that scrolled past before its definitive
-/// pass could run keeps its hypothesis and is dropped from the queue:
-/// translating speech nobody can see anymore only delays the words they can.
+///  * **Re-translation** (Arivazhagan et al., 2020 — the approach Google's
+///    streaming translation shipped): each request translates one whole
+///    utterance from scratch. Requests are *stateless*, so a slow or lost
+///    response can never corrupt state — a newer response simply supersedes
+///    it. Because at most one request per slot is ever in flight, source
+///    growth while a request runs is naturally *conflated*: the next request
+///    picks up the latest text, and the request rate self-paces to the
+///    model's latency.
 ///
-/// Everything here runs on the main thread; LLM completions are bounced back
-/// to it. No locks, no shared mutable state.
+///  * **Local agreement** (Liu et al., 2020), trailing word masked: the
+///    prefix on which two consecutive hypotheses agree is committed (rendered
+///    white); the rest stays draft (dimmed). Commitment is monotonic within
+///    an utterance, so a committed word never flickers back.
+///
+/// ## Model
+///
+/// The transcriber emits one utterance per line and only ever appends (a
+/// pause seals the current line; see LongFormTranscriber). So the engine
+/// holds an append-only array of `Utterance`, each with a stable `id`. The
+/// last one may be *live* (still being spoken); the rest are *sealed*.
+///
+/// A single representation carries every state. Translation quality is a
+/// value, not a scatter of flags:
+///
+///   - `.none`  — not translated yet → the caption shows the SOURCE text in
+///     grey, so a slow, rate-limited, or offline LLM never blanks out speech.
+///   - `.draft` — a live hypothesis (or a sealed line still awaiting its
+///     quality pass); split white/grey at the agreement point.
+///   - `.final` — the definitive, whole-sentence translation; fully white.
+///
+/// Sealing needs no copying: a live utterance simply flips `sealed = true`
+/// and keeps whatever `.draft` it had — that draft *is* the provisional
+/// translation. The quality pass later upgrades it to `.final`.
+///
+/// ## Requests
+///
+/// Two slots run concurrently, each holding the id it is translating:
+///
+///   - **live**   — keeps the spoken line current (fragment prompt, zero
+///     reasoning effort, reuses the prior hypothesis for prefix stability).
+///   - **quality** — upgrades the newest sealed lines to `.final` (whole
+///     sentence, low reasoning effort, no reuse chain — this is where
+///     translation quality comes from). Lines that scroll out of the caption
+///     window before their turn are abandoned, not queued: translating
+///     speech nobody can see only delays the words they can.
+///
+/// A shared circuit breaker stops issuing requests after a run of failures
+/// and resumes after a cooldown; captions fall back to source meanwhile.
+///
+/// Single-threaded (main). LLM completions bounce back to main. No locks.
 final class TranslationEngine {
     /// English name of the target language, used verbatim in the prompt.
     var targetLanguage = "English"
 
-    /// Fired on every display change: the full translated log (for the
-    /// transcript window) and styled caption pieces (white = committed,
-    /// dimmed = still-moving hypothesis). Main thread.
-    var onDisplay: ((_ transcript: String, _ caption: [(text: String, isFinal: Bool)]) -> Void)?
+    /// One styled caption run: `committed` text renders white, else dimmed.
+    struct CaptionRun {
+        let text: String
+        let committed: Bool
+    }
+
+    /// Fired on every display change with the full translated log (for the
+    /// transcript window) and the caption runs (for the overlay). Main thread.
+    var onDisplay: ((_ transcript: String, _ caption: [CaptionRun]) -> Void)?
+
+    // MARK: Tunables
+
+    /// Below this many characters, live text is more likely recognizer noise
+    /// than a translatable utterance; wait for the next revision.
+    private let minLiveChars = 2
+    /// Newest sealed lines eligible for a quality pass. Older ones have
+    /// scrolled off the caption; their draft (if any) is good enough for the log.
+    private let qualityWindow = 2
+    /// Give up a sealed line's quality pass after this many failures.
+    private let maxQualityAttempts = 2
+    /// Caption shows this many trailing lines, broadcast style.
+    private let captionLines = 3
+    /// Circuit breaker: pause requests after this many consecutive failures…
+    private let breakerThreshold = 6
+    /// …for this long, then probe again on the next feed.
+    private let breakerCooldown: TimeInterval = 30
+
+    // MARK: State
+
+    private enum Translation {
+        case none
+        case draft(text: String, committed: Int)
+        case final(text: String)
+
+        /// The translated text, or nil when untranslated.
+        var text: String? {
+            switch self {
+            case .none: return nil
+            case .draft(let t, _), .final(let t): return t
+            }
+        }
+        var isFinal: Bool { if case .final = self { return true }; return false }
+    }
 
     private struct Utterance {
-        let source: String
-        var translation: String?
-        /// The translation is a hypothesis whose source snapshot didn't quite
-        /// cover the sealed text (it grew a few characters between the last
-        /// re-translation and the seal). Shown as-is — a near-complete
-        /// translation must never regress to source text on screen — but the
-        /// catch-up pump still owes this line a definitive pass.
-        var isProvisional = false
-        /// Failed catch-up attempts; the line is abandoned after a couple so
-        /// a dead network can't spin the pump forever on one utterance.
-        var attempts = 0
+        let id: Int
+        var source: String
+        var sealed: Bool
+        var translation: Translation = .none
+        /// The source text that `translation` currently reflects. When this
+        /// differs from `source` (the live line grew), a refresh is due.
+        var translatedSource: String?
+        /// Failed quality-pass attempts, for give-up.
+        var qualityAttempts = 0
+
+        /// Caption runs for this line. `.none` falls back to the source text
+        /// so speech is always visible even with no translation.
+        func runs(trailingNewline: Bool) -> [CaptionRun] {
+            let nl = trailingNewline ? "\n" : ""
+            switch translation {
+            case .none:
+                return [CaptionRun(text: source + nl, committed: false)]
+            case .final(let t):
+                return [CaptionRun(text: t + nl, committed: true)]
+            case .draft(let t, let committed):
+                let chars = Array(t)
+                let cut = min(max(0, committed), chars.count)
+                var runs: [CaptionRun] = []
+                if cut > 0 {
+                    runs.append(CaptionRun(text: String(chars[..<cut]), committed: true))
+                }
+                let tail = String(chars[cut...]) + nl
+                if !tail.isEmpty {
+                    runs.append(CaptionRun(text: tail, committed: false))
+                }
+                return runs.isEmpty ? [CaptionRun(text: nl, committed: false)] : runs
+            }
+        }
     }
 
-    /// Sealed utterances in order. Only ever appended.
-    private var sealed: [Utterance] = []
+    /// A request in flight, tagged with the utterance and source it translates
+    /// so a late response can be matched back by id and validated by source.
+    private struct Request {
+        let id: Int
+        let source: String
+    }
 
-    // Open-utterance state (re-translation + local agreement).
-    private var openSource = ""
-    /// Latest hypothesis for the open utterance and the exact source text it
-    /// translated — when that source seals unchanged, the hypothesis IS the
-    /// final translation and no extra request is needed.
-    private var openHypothesis = ""
-    private var openHypothesisSource = ""
-    /// Committed (white) length of openHypothesis, in characters. Monotonic.
-    private var openCommitted = 0
-
-    private var openInFlight = false
-    private var openDirty = false
-    /// Consecutive failed requests for the current open utterance; retries
-    /// stop after a few and re-arm when the source changes.
-    private var openFailures = 0
-    private var sealedInFlight = false
-
-    /// Only the newest sealed utterances get a definitive pass; anything
-    /// older has scrolled off the caption already, and its provisional
-    /// hypothesis (when it has one) is good enough for the log.
-    private let sealedCatchUpWindow = 2
-
-    /// Bumped by reset()/teardown() so responses from a previous session are
-    /// dropped instead of folded into the new one.
+    private var utterances: [Utterance] = []
+    private var nextID = 0
+    /// Bumped on reset/teardown; responses from an older generation are dropped.
     private var generation = 0
 
-    /// Session start: forget everything, invalidate in-flight responses.
+    private var liveRequest: Request?
+    private var qualityRequest: Request?
+
+    private var failureStreak = 0
+    private var pausedUntil = Date.distantPast
+
+    // MARK: - Lifecycle
+
+    /// Session start: forget everything and invalidate any in-flight responses.
     func reset() {
         generation &+= 1
-        sealed.removeAll()
-        clearOpen()
-        openInFlight = false
-        sealedInFlight = false
+        utterances.removeAll()
+        liveRequest = nil
+        qualityRequest = nil
+        failureStreak = 0
+        pausedUntil = .distantPast
     }
 
-    /// Session end: invalidate in-flight responses; keep nothing running.
+    /// Session end: invalidate in-flight responses.
     func teardown() {
         generation &+= 1
-        openInFlight = false
-        sealedInFlight = false
+        liveRequest = nil
+        qualityRequest = nil
     }
 
-    /// Feeds the transcriber's full accumulated text (one utterance per line;
-    /// a trailing newline means the last utterance was sealed and nothing new
-    /// has been spoken yet).
+    // MARK: - Input
+
+    /// Feeds the transcriber's full accumulated text — one utterance per line,
+    /// a trailing newline meaning the last line just sealed. The transcript is
+    /// append-only, so existing line indices keep their meaning and a former
+    /// live line may now be sealed.
     func feed(_ text: String, stableLength: Int) {
-        let hasOpen = !text.hasSuffix("\n")
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-        let newOpen = hasOpen ? (lines.popLast() ?? "") : ""
+        let liveSource: String? = text.hasSuffix("\n") ? nil : lines.popLast()
 
-        // Absorb newly sealed utterances. A single final can seal several
-        // lines at once (sentence-by-sentence sealing of a long blob).
-        let sealedBefore = sealed.count
-        while sealed.count < lines.count {
-            let source = lines[sealed.count]
-            var utterance = Utterance(source: source, translation: nil)
-            // Carry the open hypothesis over as this line's provisional
-            // translation whenever their sources are prefix-related. Exact
-            // coverage is rare — the source usually grows a few characters
-            // between the last re-translation and the seal — and losing the
-            // hypothesis here is what made lines regress to source text on
-            // screen. The catch-up pump replaces it with a definitive
-            // full-sentence translation either way.
-            if !openHypothesis.isEmpty, !openHypothesisSource.isEmpty,
-               source.hasPrefix(openHypothesisSource) || openHypothesisSource.hasPrefix(source) {
-                utterance.translation = openHypothesis
-                utterance.isProvisional = true
-                // Consume it: a hypothesis must not duplicate across several
-                // lines when one blob seals sentence by sentence.
-                openHypothesis = ""
-                openHypothesisSource = ""
+        // Sealed lines, by index. When a line's source changed:
+        //  - it grew (the live line's last words arrived as it sealed): the
+        //    draft still applies — keep it as the provisional translation.
+        //  - it's unrelated text (the recognizer re-split or re-transcribed a
+        //    line): the old translation is wrong, so drop it.
+        // Either way the sealed text differs from what was translated, so the
+        // quality pass gets fresh attempts to produce the final.
+        for (i, src) in lines.enumerated() {
+            if i < utterances.count {
+                if utterances[i].source != src {
+                    let grew = src.hasPrefix(utterances[i].source) || utterances[i].source.hasPrefix(src)
+                    utterances[i].source = src
+                    if !grew {
+                        utterances[i].translation = .none
+                        utterances[i].translatedSource = nil
+                    }
+                    utterances[i].qualityAttempts = 0
+                }
+                utterances[i].sealed = true
+            } else {
+                utterances.append(Utterance(id: mintID(), source: src, sealed: true, translatedSource: nil))
             }
-            sealed.append(utterance)
-        }
-        if sealed.count > sealedBefore {
-            // The utterance we were re-translating is sealed; whatever comes
-            // next is a fresh one with fresh agreement state.
-            clearOpen()
-            pumpSealed()
         }
 
-        if newOpen != openSource {
-            openSource = newOpen
-            openFailures = 0
-            scheduleOpen()
+        // The live line. Growth keeps the existing draft (its committed prefix
+        // is monotonic); the differing translatedSource triggers a refresh.
+        if let liveSource {
+            let i = lines.count
+            if i < utterances.count {
+                if utterances[i].source != liveSource {
+                    utterances[i].source = liveSource
+                }
+                utterances[i].sealed = false
+            } else {
+                utterances.append(Utterance(id: mintID(), source: liveSource, sealed: false, translatedSource: nil))
+            }
         }
+
+        schedule()
         render()
     }
 
-    // MARK: - Open utterance (re-translation loop)
-
-    private func clearOpen() {
-        openSource = ""
-        openHypothesis = ""
-        openHypothesisSource = ""
-        openCommitted = 0
-        openDirty = false
-        openFailures = 0
-        // openInFlight stays: it mirrors a real network request, whose
-        // completion still needs to land (and may resolve a sealed line).
+    private func mintID() -> Int {
+        defer { nextID += 1 }
+        return nextID
     }
 
-    private func scheduleOpen() {
-        // One or two characters is recognizer noise more often than speech;
-        // the next revision will requalify it.
-        guard openSource.count >= 2 else { return }
-        if openInFlight {
-            openDirty = true
-            return
+    // MARK: - Scheduling
+
+    /// Fills whichever request slots are free with the highest-value work.
+    private func schedule() {
+        guard Date() >= pausedUntil else { return }
+        if liveRequest == nil, let i = liveTarget() { dispatchLive(i) }
+        if qualityRequest == nil, let i = qualityTarget() { dispatchQuality(i) }
+    }
+
+    /// The live line, when it has enough text and its translation is stale.
+    private func liveTarget() -> Int? {
+        guard let i = utterances.indices.last, !utterances[i].sealed else { return nil }
+        let u = utterances[i]
+        guard u.source.count >= minLiveChars else { return nil }
+        guard u.translatedSource != u.source else { return nil }
+        return i
+    }
+
+    /// The newest sealed line in the caption window still owed a `.final`,
+    /// that hasn't exhausted its attempts.
+    private func qualityTarget() -> Int? {
+        let sealedIdxs = utterances.indices.filter { utterances[$0].sealed }
+        guard let newest = sealedIdxs.last else { return nil }
+        for i in sealedIdxs.reversed() {
+            guard i > newest - qualityWindow else { break }
+            let u = utterances[i]
+            if !u.translation.isFinal, u.qualityAttempts < maxQualityAttempts {
+                return i
+            }
         }
-        fireOpen()
+        return nil
     }
 
-    /// The last couple of utterances before `index` (or the tail when nil),
-    /// joined as translation context. Live transcripts fragment heavily —
-    /// "그것", "讨论会" — and one fragment of context is routinely too little
-    /// to disambiguate the next one.
-    private func contextWindow(before index: Int? = nil) -> (source: String, translation: String?)? {
-        let end = index ?? sealed.count
-        let window = sealed[max(0, end - 2)..<end]
+    // MARK: - Requests
+
+    private func dispatchLive(_ i: Int) {
+        let u = utterances[i]
+        liveRequest = Request(id: u.id, source: u.source)
+        let gen = generation
+        let ctx = context(before: i)
+        LLMRefiner.translate(
+            u.source,
+            to: targetLanguage,
+            context: ctx?.source,
+            contextTranslation: ctx?.translation,
+            isFragment: true,
+            previousTranslation: u.translation.text
+        ) { [weak self] result in
+            DispatchQueue.main.async { self?.completeLive(result, gen: gen) }
+        }
+    }
+
+    private func dispatchQuality(_ i: Int) {
+        let u = utterances[i]
+        qualityRequest = Request(id: u.id, source: u.source)
+        let gen = generation
+        let ctx = context(before: i)
+        LLMRefiner.translate(
+            u.source,
+            to: targetLanguage,
+            context: ctx?.source,
+            contextTranslation: ctx?.translation,
+            effort: "low"
+        ) { [weak self] result in
+            DispatchQueue.main.async { self?.completeQuality(result, gen: gen) }
+        }
+    }
+
+    private func completeLive(_ result: Result<String, Error>, gen: Int) {
+        guard gen == generation, let req = liveRequest else { return }
+        liveRequest = nil
+        switch result {
+        case .success(let raw):
+            noteSuccess()
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty, let i = index(of: req.id),
+               sourceCompatible(req.source, utterances[i].source) {
+                foldDraft(&utterances[i], newText: text, translatedSource: req.source)
+            }
+        case .failure(let error):
+            SpeechService.diag("translate live FAILED: \(error.localizedDescription)")
+            noteFailure()
+        }
+        render()
+        schedule()
+    }
+
+    private func completeQuality(_ result: Result<String, Error>, gen: Int) {
+        guard gen == generation, let req = qualityRequest else { return }
+        qualityRequest = nil
+        switch result {
+        case .success(let raw):
+            noteSuccess()
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty, let i = index(of: req.id), utterances[i].source == req.source {
+                utterances[i].translation = .final(text: text)
+                utterances[i].translatedSource = req.source
+            }
+        case .failure(let error):
+            SpeechService.diag("translate quality FAILED: \(error.localizedDescription)")
+            noteFailure()
+            if let i = index(of: req.id) { utterances[i].qualityAttempts += 1 }
+        }
+        render()
+        schedule()
+    }
+
+    /// Folds a fresh live hypothesis into an utterance via local agreement.
+    /// Never overwrites a `.final` (the quality pass already won). Commitment
+    /// is monotonic: it only ever grows.
+    private func foldDraft(_ u: inout Utterance, newText: String, translatedSource: String) {
+        if u.translation.isFinal { return }
+        let previous = u.translation.text ?? ""
+        let agreed = Self.agreedLength(previous: previous, current: newText)
+        let priorCommitted: Int = {
+            if case .draft(_, let c) = u.translation { return c }
+            return 0
+        }()
+        let committed = min(max(priorCommitted, agreed), newText.count)
+        u.translation = .draft(text: newText, committed: committed)
+        u.translatedSource = translatedSource
+    }
+
+    /// A response is still applicable if the utterance's source hasn't moved
+    /// away from the snapshot — grown or shrunk while staying prefix-related.
+    private func sourceCompatible(_ snapshot: String, _ current: String) -> Bool {
+        !snapshot.isEmpty && (current.hasPrefix(snapshot) || snapshot.hasPrefix(current))
+    }
+
+    private func index(of id: Int) -> Int? {
+        utterances.firstIndex { $0.id == id }
+    }
+
+    /// The two utterances before `index`, joined as translation context —
+    /// live transcripts fragment heavily ("그것", "讨论会") and one fragment is
+    /// often too little to disambiguate the next.
+    private func context(before index: Int) -> (source: String, translation: String?)? {
+        let window = utterances[max(0, index - 2)..<index]
         guard !window.isEmpty else { return nil }
-        let translation = window.compactMap { $0.translation }.joined(separator: "\n")
+        let translation = window.compactMap { $0.translation.text }.joined(separator: "\n")
         return (
             window.map { $0.source }.joined(separator: "\n"),
             translation.isEmpty ? nil : translation
         )
     }
 
-    private func fireOpen() {
-        openInFlight = true
-        openDirty = false
-        let snapshot = openSource
-        let gen = generation
-        let context = contextWindow()
-        LLMRefiner.translate(
-            snapshot,
-            to: targetLanguage,
-            context: context?.source,
-            contextTranslation: context?.translation,
-            isFragment: true,
-            previousTranslation: openHypothesis.isEmpty ? nil : openHypothesis
-        ) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, gen == self.generation else { return }
-                self.openInFlight = false
-                switch result {
-                case .success(let translation):
-                    self.accept(
-                        hypothesis: translation.trimmingCharacters(in: .whitespacesAndNewlines),
-                        for: snapshot)
-                    if self.openDirty { self.fireOpen() }
-                case .failure(let error):
-                    SpeechService.diag("translate open FAILED: \(error.localizedDescription)")
-                    // A swallowed failure left the utterance untranslated
-                    // until its source next changed — which never happens
-                    // once the speaker pauses. Retry with backoff, but stop
-                    // after a few: against an outage (rate limit, no
-                    // network) endless retries only burn quota. A source
-                    // change re-arms the counter.
-                    self.openFailures += 1
-                    guard self.openFailures <= 4 else { return }
-                    let delay = min(5.0, 0.8 * pow(2, Double(self.openFailures - 1)))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                        guard let self, gen == self.generation, !self.openInFlight,
-                              !self.openSource.isEmpty else { return }
-                        self.fireOpen()
-                    }
-                }
-            }
+    // MARK: - Circuit breaker
+
+    private func noteFailure() {
+        failureStreak += 1
+        if failureStreak >= breakerThreshold, pausedUntil < Date() {
+            pausedUntil = Date().addingTimeInterval(breakerCooldown)
+            SpeechService.diag("translate paused \(Int(breakerCooldown))s after \(failureStreak) failures")
         }
     }
 
-    private func accept(hypothesis: String, for source: String) {
-        guard !hypothesis.isEmpty else { return }
-        // A response for a source that sealed mid-flight resolves that line
-        // (checked first: an exact sealed match beats a fuzzy open match).
-        if let i = sealed.lastIndex(where: { $0.source == source && $0.translation == nil }) {
-            sealed[i].translation = hypothesis
-        } else if !source.isEmpty, !openSource.isEmpty,
-                  openSource.hasPrefix(source) || source.hasPrefix(openSource) {
-            // Still the same utterance — grown, or revised shorter by the
-            // recognizer. Fold into the agreement state either way: a
-            // slightly stale hypothesis on screen beats no caption at all.
-            let agreed = Self.agreedLength(previous: openHypothesis, current: hypothesis)
-            openCommitted = min(max(openCommitted, agreed), hypothesis.count)
-            openHypothesis = hypothesis
-            openHypothesisSource = source
-        } else {
-            return // stale response for text that no longer exists anywhere
-        }
-        render()
+    private func noteSuccess() {
+        failureStreak = 0
+        pausedUntil = .distantPast
     }
 
-    /// Local agreement with a one-word mask: how many characters of `current`
-    /// both hypotheses agree on, pulled back to the last word boundary so a
-    /// half-typed word never commits. Spaceless scripts (CJK) mask a fixed
-    /// few characters instead.
+    // MARK: - Local agreement
+
+    /// How many characters of `current` both hypotheses agree on, pulled back
+    /// to the last word boundary so a half-formed word never commits. Spaceless
+    /// scripts (CJK) fall back to masking a few trailing characters.
     private static func agreedLength(previous: String, current: String) -> Int {
         guard !previous.isEmpty else { return 0 }
         let a = Array(previous), b = Array(current)
@@ -268,78 +411,22 @@ final class TranslationEngine {
         return max(0, i - 3)
     }
 
-    // MARK: - Sealed utterances (definitive pass)
-
-    /// Every sealed utterance owes one definitive translation: the whole,
-    /// finished sentence, translated fresh — no verbatim-reuse instruction
-    /// chaining it to hypotheses made while the sentence was half-spoken, and
-    /// a notch more reasoning. This is where translation QUALITY comes from;
-    /// the open-utterance loop only keeps the screen current. One request at
-    /// a time, newest first; older gaps are abandoned (see class comment).
-    private func pumpSealed() {
-        guard !sealedInFlight else { return }
-        guard let i = sealed.indices.reversed().first(where: {
-            (sealed[$0].translation == nil || sealed[$0].isProvisional) && sealed[$0].attempts < 2
-        }), i >= sealed.count - sealedCatchUpWindow else { return }
-        sealedInFlight = true
-        let gen = generation
-        let source = sealed[i].source
-        let context = contextWindow(before: i)
-        LLMRefiner.translate(
-            source,
-            to: targetLanguage,
-            context: context?.source,
-            contextTranslation: context?.translation,
-            effort: "low"
-        ) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, gen == self.generation else { return }
-                self.sealedInFlight = false
-                switch result {
-                case .success(let translation):
-                    let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty,
-                       let j = self.sealed.lastIndex(where: { $0.source == source }) {
-                        self.sealed[j].translation = trimmed
-                        self.sealed[j].isProvisional = false
-                        self.render()
-                    }
-                case .failure(let error):
-                    SpeechService.diag("translate sealed FAILED: \(error.localizedDescription)")
-                    if let j = self.sealed.lastIndex(where: { $0.source == source }) {
-                        self.sealed[j].attempts += 1
-                    }
-                }
-                self.pumpSealed()
-            }
-        }
-    }
-
     // MARK: - Rendering
 
     private func render() {
-        // Transcript window: the full session log. An untranslated sealed
-        // line keeps its source text — information is never dropped there.
-        var log = sealed.map { $0.translation ?? $0.source }
-        if !openHypothesis.isEmpty { log.append(openHypothesis) }
-        let transcript = log.joined(separator: "\n")
+        // Transcript log: translation when present, else source — a dead LLM
+        // never drops information from the record.
+        let transcript = utterances
+            .map { $0.translation.text ?? $0.source }
+            .joined(separator: "\n")
 
-        // Caption: a rolling window of the newest lines, three at a time
-        // like broadcast captions. A line leaves only by scrolling off the
-        // top when a newer one arrives — never by vanishing mid-read — and a
-        // partially translated line (a provisional hypothesis) stays up
-        // until its definitive translation replaces it in place. Source
-        // text never appears here.
-        var caption: [(text: String, isFinal: Bool)] = []
-        let sealedSlots = openHypothesis.isEmpty ? 3 : 2
-        for translation in sealed.compactMap({ $0.translation }).suffix(sealedSlots) {
-            caption.append((translation + "\n", true))
-        }
-        if !openHypothesis.isEmpty {
-            let chars = Array(openHypothesis)
-            let cut = min(openCommitted, chars.count)
-            if cut > 0 { caption.append((String(chars[..<cut]), true)) }
-            if cut < chars.count { caption.append((String(chars[cut...]), false)) }
+        // Caption: the newest lines, rolling. A line leaves only by scrolling
+        // off the top when a newer one arrives — never by vanishing mid-read.
+        let visible = utterances.suffix(captionLines)
+        var caption: [CaptionRun] = []
+        for (offset, u) in visible.enumerated() {
+            let isLast = offset == visible.count - 1
+            caption.append(contentsOf: u.runs(trailingNewline: !isLast))
         }
         onDisplay?(transcript, caption)
     }

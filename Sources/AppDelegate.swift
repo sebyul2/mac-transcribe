@@ -339,9 +339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         translator.onDisplay = { [weak self] transcript, caption in
             self?.transcriptWindow.updateTranscript(transcript)
-            // Committed words render white, the still-moving hypothesis
-            // dimmed; the source language never appears in the captions.
-            self?.subtitles.update(pieces: caption)
+            // Committed words render white, the still-moving hypothesis (or an
+            // untranslated line's source fallback) dimmed.
+            self?.subtitles.update(pieces: caption.map { ($0.text, $0.committed) })
         }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         longForm.onStatus = { [weak self] status in
