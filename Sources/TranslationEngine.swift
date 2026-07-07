@@ -72,6 +72,9 @@ final class TranslationEngine {
 
     private var openInFlight = false
     private var openDirty = false
+    /// Consecutive failed requests for the current open utterance; retries
+    /// stop after a few and re-arm when the source changes.
+    private var openFailures = 0
     private var sealedInFlight = false
 
     /// Only the newest sealed utterances get a definitive pass; anything
@@ -140,6 +143,7 @@ final class TranslationEngine {
 
         if newOpen != openSource {
             openSource = newOpen
+            openFailures = 0
             scheduleOpen()
         }
         render()
@@ -153,6 +157,7 @@ final class TranslationEngine {
         openHypothesisSource = ""
         openCommitted = 0
         openDirty = false
+        openFailures = 0
         // openInFlight stays: it mirrors a real network request, whose
         // completion still needs to land (and may resolve a sealed line).
     }
@@ -210,9 +215,14 @@ final class TranslationEngine {
                     SpeechService.diag("translate open FAILED: \(error.localizedDescription)")
                     // A swallowed failure left the utterance untranslated
                     // until its source next changed — which never happens
-                    // once the speaker pauses. Retry on a short delay while
-                    // the utterance is still the open one.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                    // once the speaker pauses. Retry with backoff, but stop
+                    // after a few: against an outage (rate limit, no
+                    // network) endless retries only burn quota. A source
+                    // change re-arms the counter.
+                    self.openFailures += 1
+                    guard self.openFailures <= 4 else { return }
+                    let delay = min(5.0, 0.8 * pow(2, Double(self.openFailures - 1)))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, gen == self.generation, !self.openInFlight,
                               !self.openSource.isEmpty else { return }
                         self.fireOpen()
@@ -314,11 +324,15 @@ final class TranslationEngine {
         if !openHypothesis.isEmpty { log.append(openHypothesis) }
         let transcript = log.joined(separator: "\n")
 
-        // Caption: the previous utterance's finished translation for
-        // continuity, then the open hypothesis split white/dim at the
-        // agreement point. Source text never appears here.
+        // Caption: a rolling window of the newest lines, three at a time
+        // like broadcast captions. A line leaves only by scrolling off the
+        // top when a newer one arrives — never by vanishing mid-read — and a
+        // partially translated line (a provisional hypothesis) stays up
+        // until its definitive translation replaces it in place. Source
+        // text never appears here.
         var caption: [(text: String, isFinal: Bool)] = []
-        if let last = sealed.last, let translation = last.translation {
+        let sealedSlots = openHypothesis.isEmpty ? 3 : 2
+        for translation in sealed.compactMap({ $0.translation }).suffix(sealedSlots) {
             caption.append((translation + "\n", true))
         }
         if !openHypothesis.isEmpty {

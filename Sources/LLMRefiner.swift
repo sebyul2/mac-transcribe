@@ -166,10 +166,12 @@ enum LLMRefiner {
 
             Your previous translation of this same, still-growing utterance (shown live on screen): \
             \(previousTranslation)
-            The source has grown since. Reuse the previous translation's wording VERBATIM as the \
-            beginning of your output and extend it to cover the new material. Only change an \
-            existing word if the source revision made it factually wrong — never rephrase for \
-            style, tone, or flow. A stable prefix matters more than elegance.
+            The source has grown since. FIRST check that the previous translation actually \
+            translates this source: if it does not (mistranslation, unrelated text, garbled early \
+            guess), DISCARD it entirely and translate the source correctly — accuracy always beats \
+            stability. If it is correct, reuse its wording verbatim as the beginning of your output \
+            and extend it to cover the new material; never rephrase correct text for style, tone, \
+            or flow.
             """
         }
         request(

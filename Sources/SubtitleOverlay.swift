@@ -25,10 +25,18 @@ final class SubtitleOverlay {
     private let bottomMargin: CGFloat = 14
     private let cornerRadius: CGFloat = 8
     /// How many trailing sentences to show.
-    var maxLines = 2
-    /// Hard cap on RENDERED lines — sentences wrap, so this exceeds maxLines.
-    /// The label must never clip the newest text.
-    private let renderedLineCap = 4
+    var maxLines = 2 {
+        didSet { textField.maximumNumberOfLines = renderedLineCap }
+    }
+    /// Broadcast-caption idle fade. On for meeting captions (a stale line
+    /// reads as still-being-said); OFF for live translation, where a line
+    /// must stay put until the next utterance scrolls it — or its own
+    /// delayed translation arrives — rather than vanishing mid-read.
+    var fadeWhenIdle = true
+    /// Hard cap on RENDERED lines — each caption line can wrap, so this must
+    /// exceed maxLines or the newest text gets clipped. Two rendered lines
+    /// per caption line covers a long sentence that wraps once.
+    private var renderedLineCap: Int { max(4, maxLines * 2) }
     /// Roughly the last caption-worth of text to show.
     private var tailLength: Int { maxLines * 70 }
     private let closeSize: CGFloat = 20
@@ -87,7 +95,8 @@ final class SubtitleOverlay {
         textField.isEditable = false
         textField.isSelectable = false
         textField.alignment = .center
-        textField.maximumNumberOfLines = renderedLineCap
+        // Concrete initial cap; maxLines.didSet keeps it in sync afterward.
+        textField.maximumNumberOfLines = max(4, maxLines * 2)
         textField.lineBreakMode = .byTruncatingHead
         captionBox.addSubview(textField)
 
@@ -140,7 +149,7 @@ final class SubtitleOverlay {
     private func startIdleTimer() {
         idleTimer?.invalidate()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self, self.armed, self.panel.isVisible,
+            guard let self, self.fadeWhenIdle, self.armed, self.panel.isVisible,
                   self.lastContentAt != .distantPast,
                   Date().timeIntervalSince(self.lastContentAt) >= self.idleFadeAfter else { return }
             NSAnimationContext.runAnimationGroup({ ctx in

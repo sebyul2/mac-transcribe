@@ -500,9 +500,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // so the first real utterance doesn't pay for any of it.
             LLMRefiner.warmUpTranslation(to: settings.interpreterTargetLanguage)
         }
-        // Interpreter captions run a line taller: translations trail speech,
-        // so the extra sentence of continuity keeps them readable.
+        // Interpreter captions run taller (three lines of continuity: a
+        // translation trails its speech, so the surrounding lines keep it
+        // readable) and never idle-fade — a line stays until the next
+        // utterance scrolls it or its own delayed translation lands.
         subtitles.maxLines = mode == .interpreter ? 3 : 2
+        subtitles.fadeWhenIdle = mode != .interpreter
         longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
         NSLog("MacTranscribe[App]: locked recording started mode=\(mode)")
         // Tear down the short push-to-talk session left over from the
