@@ -136,6 +136,7 @@ enum LLMRefiner {
     static func translate(
         _ text: String,
         to language: String,
+        from sourceLanguage: String? = nil,
         context: String? = nil,
         contextTranslation: String? = nil,
         isFragment: Bool = false,
@@ -144,8 +145,17 @@ enum LLMRefiner {
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let settings = Settings.shared
+        // Name the source only when the user pinned one; "Auto"/nil lets the
+        // model detect it (right for mixed-language meetings).
+        let fromClause: String
+        if let sourceLanguage, !sourceLanguage.isEmpty,
+           sourceLanguage != TranslationLanguage.autoSource {
+            fromClause = "from \(sourceLanguage) "
+        } else {
+            fromClause = ""
+        }
         var prompt = """
-        You are a simultaneous interpreter. Translate the user's text into \(language). \
+        You are a simultaneous interpreter. Translate the user's text \(fromClause)into \(language). \
         The text comes from live speech recognition: it may contain filler sounds \
         (uh, 어, 음, 那个, 呃), false starts, and recognition noise. Translate the \
         intended meaning into clean, natural \(language) and drop the fillers. \

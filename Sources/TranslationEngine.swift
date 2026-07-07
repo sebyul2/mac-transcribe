@@ -59,6 +59,9 @@ import Foundation
 final class TranslationEngine {
     /// English name of the target language, used verbatim in the prompt.
     var targetLanguage = "English"
+    /// English name of the source language, or "Auto" to let the model detect
+    /// it. Set apart from the recognition language (which drives speech-to-text).
+    var sourceLanguage = TranslationLanguage.autoSource
 
     /// One styled caption run: `committed` text renders white, else dimmed.
     struct CaptionRun {
@@ -277,6 +280,7 @@ final class TranslationEngine {
         LLMRefiner.translate(
             u.source,
             to: targetLanguage,
+            from: sourceLanguage,
             context: ctx?.source,
             contextTranslation: ctx?.translation,
             isFragment: true,
@@ -294,6 +298,7 @@ final class TranslationEngine {
         LLMRefiner.translate(
             u.source,
             to: targetLanguage,
+            from: sourceLanguage,
             context: ctx?.source,
             contextTranslation: ctx?.translation,
             effort: "low"

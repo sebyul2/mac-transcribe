@@ -32,6 +32,26 @@ enum RecognitionLanguage: String, CaseIterable {
     }
 }
 
+/// A language offered for live translation: `prompt` is the name used verbatim
+/// in the translation prompt; `display` is what the settings UI shows.
+struct TranslationLanguage {
+    let prompt: String
+    let display: String
+
+    /// Target languages. Source adds an Auto-detect option in front.
+    static let targets: [TranslationLanguage] = [
+        TranslationLanguage(prompt: "English", display: "English"),
+        TranslationLanguage(prompt: "Korean", display: "한국어"),
+        TranslationLanguage(prompt: "Japanese", display: "日本語"),
+        TranslationLanguage(prompt: "Simplified Chinese", display: "简体中文"),
+        TranslationLanguage(prompt: "Traditional Chinese", display: "繁體中文"),
+    ]
+    /// Sentinel prompt value meaning "let the model detect the source".
+    static let autoSource = "Auto"
+    static let sources: [TranslationLanguage] =
+        [TranslationLanguage(prompt: autoSource, display: "자동 감지 (Auto-detect)")] + targets
+}
+
 /// Thin wrapper around UserDefaults for persisted configuration.
 final class Settings {
     static let shared = Settings()
@@ -55,6 +75,7 @@ final class Settings {
         static let longTriggerKeyMods = "longTriggerKeyModifiers"
         static let meetingNotes = "meetingNotesEnabled"
         static let interpreterTarget = "interpreterTargetLanguage"
+        static let interpreterSource = "interpreterSourceLanguage"
         static let liveTranslation = "liveTranslationEnabled"
         static let audioSource = "lockedAudioSource"
     }
@@ -195,6 +216,15 @@ final class Settings {
     var interpreterTargetLanguage: String {
         get { defaults.string(forKey: Keys.interpreterTarget) ?? "English" }
         set { defaults.set(newValue, forKey: Keys.interpreterTarget) }
+    }
+
+    /// Source language for live translation. "Auto" (the default) lets the
+    /// model detect it; any other value is named in the prompt so mixed-
+    /// language meetings translate a chosen source consistently — set apart
+    /// from the recognition language, which drives speech-to-text.
+    var interpreterSourceLanguage: String {
+        get { defaults.string(forKey: Keys.interpreterSource) ?? TranslationLanguage.autoSource }
+        set { defaults.set(newValue, forKey: Keys.interpreterSource) }
     }
 
     /// Generate structured meeting notes with the LLM after a locked

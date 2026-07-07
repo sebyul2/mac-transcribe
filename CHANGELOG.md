@@ -2,6 +2,11 @@
 
 ## v0.2.0
 
+- 설정 메뉴 개편
+  - 메뉴바 아이콘 메뉴는 자주 쓰는 단축 항목만 남김 (녹음 시작/정지, Live Translation, Transcript Window, Settings, Permissions, Quit)
+  - 나머지 설정은 하나의 설정창에 탭으로 통합: General(인식 언어·트리거 키·무음 자동정지), Translation(Live Translation·출발어/도착어·자막), Meeting(오디오 소스·회의록), Engine(LLM Provider/Model/계정/용어집)
+  - 번역 출발어와 도착어를 따로 지정 — 출발어는 전사(인식) 언어와 별개이며, 기본값 자동 감지로 두면 여러 언어가 섞인 회의도 도착어로 번역
+
 - 실시간 번역 (Live Translation) 재도입
   - 검증된 스트리밍 번역 방식으로 처음부터 재구현: 말하는 중인 발화 전체를 매번 새로 번역하고(re-translation), 연속된 두 번역 결과가 일치하는 앞부분만 흰색으로 확정(local agreement) — 한번 흰색이 된 단어는 다시 바뀌지 않음
   - 아직 움직이는 나머지 부분은 회색으로 표시, 원문은 자막에 표시하지 않음

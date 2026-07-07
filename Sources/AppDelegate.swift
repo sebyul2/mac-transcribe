@@ -21,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let transcriptWindow = TranscriptWindowController()
     private let subtitles = SubtitleOverlay()
     private let settingsController = SettingsWindowController()
-    private let keySettingsController = KeySettingsWindowController()
     private let permissionsController = PermissionsWindowController()
 
     private var isRecording = false
@@ -113,109 +112,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(header)
         menu.addItem(.separator())
 
-        // Language submenu.
-        let langItem = NSMenuItem(title: "Recognition Language", action: nil, keyEquivalent: "")
-        let langMenu = NSMenu()
-        for lang in RecognitionLanguage.allCases {
-            let item = NSMenuItem(title: lang.displayName, action: #selector(selectLanguage(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = lang.rawValue
-            item.state = (lang == settings.language) ? .on : .off
-            langMenu.addItem(item)
-        }
-        langItem.submenu = langMenu
-        menu.addItem(langItem)
-
-        // LLM refinement submenu.
-        let llmItem = NSMenuItem(title: "LLM Refinement", action: nil, keyEquivalent: "")
-        let llmMenu = NSMenu()
-        let toggle = NSMenuItem(title: "Enable Refinement", action: #selector(toggleLLM), keyEquivalent: "")
-        toggle.target = self
-        // Render the enabled checkmark in the image column (not the state
-        // column) so it lines up with the Settings gear icon below.
-        toggle.image = settings.llmEnabled ? menuIcon("checkmark") : nil
-        llmMenu.addItem(toggle)
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: "")
-        settingsItem.target = self
-        settingsItem.image = menuIcon("gearshape")
-        llmMenu.addItem(settingsItem)
-        llmItem.submenu = llmMenu
-        menu.addItem(llmItem)
-
-        // Auto-stop the session after sustained silence so it can't be kept alive
-        // by background sound / pauses. (A "Noise Gate" toggle previously lived
-        // here but was a no-op — audio is always forwarded to the recognizer.)
-        let autoStop = NSMenuItem(title: "Auto-stop on Silence", action: #selector(toggleSilenceAutoStop), keyEquivalent: "")
-        autoStop.target = self
-        autoStop.image = settings.silenceAutoStopEnabled ? menuIcon("checkmark") : nil
-        menu.addItem(autoStop)
-
-        menu.addItem(.separator())
-
-        // Locked (hands-free) recording: double-tap Fn or use this item; the
-        // transcript is saved to ~/Documents/MacTranscribe instead of pasted.
-        let lockTitle = isLockedRecording
-            ? "Stop Locked Recording & Save"
-            : "Start Locked Recording"
+        // Core action: start/stop a locked (hands-free) recording — saved to
+        // ~/Documents/MacTranscribe. Everything configurable lives in Settings.
+        let lockTitle = isLockedRecording ? "Stop Recording & Save" : "Start Recording"
         let lockItem = NSMenuItem(title: lockTitle, action: #selector(toggleLockedRecording), keyEquivalent: "")
         lockItem.target = self
-        lockItem.image = menuIcon(isLockedRecording ? "stop.circle" : "lock.circle")
+        lockItem.image = menuIcon(isLockedRecording ? "stop.circle" : "record.circle")
         menu.addItem(lockItem)
+
+        // Live Translation is toggled often enough per-session to earn a
+        // shortcut here; source/target languages live in Settings ▸ Translation.
+        let interpItem = NSMenuItem(title: "Live Translation", action: #selector(toggleLiveTranslation), keyEquivalent: "")
+        interpItem.target = self
+        interpItem.image = settings.liveTranslationEnabled ? menuIcon("checkmark") : nil
+        menu.addItem(interpItem)
 
         let windowItem = NSMenuItem(title: "Transcript Window…", action: #selector(openTranscriptWindow), keyEquivalent: "")
         windowItem.target = self
         windowItem.image = menuIcon("text.rectangle.page")
         menu.addItem(windowItem)
 
-        let subtitleItem = NSMenuItem(title: "Subtitle Overlay", action: #selector(toggleSubtitleOverlay), keyEquivalent: "")
-        subtitleItem.target = self
-        subtitleItem.image = settings.subtitleOverlayEnabled ? menuIcon("checkmark") : nil
-        menu.addItem(subtitleItem)
+        menu.addItem(.separator())
 
-        let notesItem = NSMenuItem(title: "Auto Meeting Notes", action: #selector(toggleMeetingNotes), keyEquivalent: "")
-        notesItem.target = self
-        notesItem.image = settings.meetingNotesEnabled ? menuIcon("checkmark") : nil
-        menu.addItem(notesItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        settingsItem.image = menuIcon("gearshape")
+        menu.addItem(settingsItem)
 
-        // One-way simultaneous interpretation: when on, locked sessions show
-        // live-translated captions; only the raw conversation is saved.
-        let interpItem = NSMenuItem(title: "Live Translation", action: #selector(toggleLiveTranslation), keyEquivalent: "")
-        interpItem.target = self
-        interpItem.image = settings.liveTranslationEnabled ? menuIcon("checkmark") : nil
-        menu.addItem(interpItem)
-
-        let interpLangItem = NSMenuItem(title: "Translation Language", action: nil, keyEquivalent: "")
-        let interpLangMenu = NSMenu()
-        let targets: [(display: String, prompt: String)] = [
-            ("English", "English"), ("한국어", "Korean"),
-            ("日本語", "Japanese"), ("简体中文", "Simplified Chinese"),
-        ]
-        for target in targets {
-            let item = NSMenuItem(title: target.display, action: #selector(selectInterpreterLanguage(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = target.prompt
-            item.state = (target.prompt == settings.interpreterTargetLanguage) ? .on : .off
-            interpLangMenu.addItem(item)
-        }
-        interpLangItem.submenu = interpLangMenu
-        menu.addItem(interpLangItem)
-
-        // Where locked sessions listen: the microphone, or what the computer
-        // itself is playing (calls, videos) via ScreenCaptureKit.
-        let sourceItem = NSMenuItem(title: "Audio Source", action: nil, keyEquivalent: "")
-        let sourceMenu = NSMenu()
-        let micItem = NSMenuItem(title: "Microphone", action: #selector(selectAudioSourceMic), keyEquivalent: "")
-        micItem.target = self
-        micItem.state = settings.lockedAudioSourceIsSystem ? .off : .on
-        sourceMenu.addItem(micItem)
-        let sysItem = NSMenuItem(title: "System Audio (what the Mac plays)", action: #selector(selectAudioSourceSystem), keyEquivalent: "")
-        sysItem.target = self
-        sysItem.state = settings.lockedAudioSourceIsSystem ? .on : .off
-        sourceMenu.addItem(sysItem)
-        sourceItem.submenu = sourceMenu
-        menu.addItem(sourceItem)
+        let permItem = NSMenuItem(title: "Permissions…", action: #selector(openPermissions), keyEquivalent: "")
+        permItem.target = self
+        permItem.image = menuIcon("lock.shield")
+        menu.addItem(permItem)
 
         menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        quit.keyEquivalentModifierMask = [.command]
+        menu.addItem(quit)
 
         // Reflect the locked-recording state in the menu-bar icon so a running
         // capture is visible even with no HUD and the window closed.
@@ -224,20 +158,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Mac Transcribe")
             button.image?.isTemplate = true
         }
-
-        let keyItem = NSMenuItem(title: "Trigger Key…", action: #selector(openKeySettings), keyEquivalent: "")
-        keyItem.target = self
-        keyItem.image = menuIcon("keyboard")
-        menu.addItem(keyItem)
-
-        let permItem = NSMenuItem(title: "Permissions…", action: #selector(openPermissions), keyEquivalent: "")
-        permItem.target = self
-        menu.addItem(permItem)
-
-        let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
-        quit.target = self
-        quit.keyEquivalentModifierMask = [.command]
-        menu.addItem(quit)
 
         statusItem.menu = menu
     }
@@ -292,11 +212,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SpeechService.diag("long trigger key -> toggle locked")
             self?.toggleLockHotkey()
         }
-        keySettingsController.fnMonitor = fnMonitor
-        keySettingsController.onTriggerChanged = { [weak self] in
+        settingsController.fnMonitor = fnMonitor
+        settingsController.onTriggerChanged = { [weak self] in
             guard let self else { return }
             self.fnMonitor.customTrigger = self.settings.triggerKey
             self.fnMonitor.longTrigger = self.settings.longTriggerKey
+        }
+        // Non-Engine settings persist immediately; apply the ones a running
+        // session or the menu bar cares about, then rebuild the menu.
+        settingsController.onSettingsChanged = { [weak self] in
+            guard let self else { return }
+            self.translator.targetLanguage = self.settings.interpreterTargetLanguage
+            self.translator.sourceLanguage = self.settings.interpreterSourceLanguage
+            if self.isLockedRecording {
+                if self.settings.subtitleOverlayEnabled { self.subtitles.show() }
+                else { self.subtitles.hide() }
+            }
+            self.rebuildMenu()
         }
 
         // Live-restart the Fn monitor the moment Input Monitoring is granted
@@ -496,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if mode == .interpreter {
             translator.reset()
             translator.targetLanguage = settings.interpreterTargetLanguage
+            translator.sourceLanguage = settings.interpreterSourceLanguage
             // Pre-warm the LLM path (token refresh, instructions cache, TLS)
             // so the first real utterance doesn't pay for any of it.
             LLMRefiner.warmUpTranslation(to: settings.interpreterTargetLanguage)
@@ -870,70 +803,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
-    @objc private func selectLanguage(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let lang = RecognitionLanguage(rawValue: raw) else { return }
-        settings.language = lang
-        rebuildMenu()
-    }
-
-    @objc private func toggleLLM() {
-        settings.llmEnabled.toggle()
-        if settings.llmEnabled && !settings.llmConfigured {
-            openSettings()
-        }
-        rebuildMenu()
-    }
-
     @objc private func openTranscriptWindow() {
         transcriptWindow.showWindow()
     }
 
-    @objc private func selectAudioSourceMic() {
-        settings.lockedAudioSourceIsSystem = false
-        rebuildMenu()
-    }
-
-    @objc private func selectAudioSourceSystem() {
-        settings.lockedAudioSourceIsSystem = true
-        rebuildMenu()
-    }
-
+    /// Live Translation keeps a menu-bar shortcut. Enabling it needs the Engine
+    /// configured, so send the user to Settings when it isn't.
     @objc private func toggleLiveTranslation() {
         settings.liveTranslationEnabled.toggle()
-        // Translation needs an LLM; open settings when none is configured yet.
         if settings.liveTranslationEnabled && !settings.llmConfigured {
             openSettings()
-        }
-        rebuildMenu()
-    }
-
-    @objc private func selectInterpreterLanguage(_ sender: NSMenuItem) {
-        guard let prompt = sender.representedObject as? String else { return }
-        settings.interpreterTargetLanguage = prompt
-        // Apply live when an interpreter session is running.
-        translator.targetLanguage = prompt
-        rebuildMenu()
-    }
-
-    @objc private func toggleMeetingNotes() {
-        settings.meetingNotesEnabled.toggle()
-        // Notes need an LLM; open settings when none is configured yet.
-        if settings.meetingNotesEnabled && !settings.llmConfigured {
-            openSettings()
-        }
-        rebuildMenu()
-    }
-
-    @objc private func toggleSubtitleOverlay() {
-        settings.subtitleOverlayEnabled.toggle()
-        // Apply immediately when a locked session is running.
-        if isLockedRecording {
-            if settings.subtitleOverlayEnabled {
-                subtitles.show()
-            } else {
-                subtitles.hide()
-            }
         }
         rebuildMenu()
     }
@@ -946,17 +825,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleSilenceAutoStop() {
-        settings.silenceAutoStopEnabled.toggle()
-        rebuildMenu()
-    }
-
     @objc private func openSettings() {
         settingsController.showWindow()
-    }
-
-    @objc private func openKeySettings() {
-        keySettingsController.showWindow()
     }
 
     @objc private func openPermissions() {
