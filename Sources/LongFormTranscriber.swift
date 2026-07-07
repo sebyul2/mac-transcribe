@@ -157,8 +157,8 @@ final class LongFormTranscriber {
         var emit = false
         var done = false
         if volatileText.isEmpty {
-            if !finalizedText.isEmpty, !finalizedText.hasSuffix("\n\n") {
-                finalizedText += "\n\n"
+            if !finalizedText.isEmpty, !finalizedText.hasSuffix("\n") {
+                finalizedText += "\n"
                 emit = true
             }
             done = true
@@ -366,12 +366,12 @@ final class LongFormTranscriber {
     }
 
     /// A run whose audio span exceeds this absorbed a speech pause (average
-    /// CJK character runs are ~0.15-0.25 s; word runs a little longer). A
-    /// pause this size separates sentences ("\n"); one over `turnRunDuration`
-    /// separates speaker turns ("\n\n" — the interpreter breaks translation
-    /// context there, but not between one speaker's consecutive sentences).
+    /// CJK character runs are ~0.15-0.25 s; word runs a little longer). Every
+    /// such pause is one utterance boundary: a single "\n". There is
+    /// deliberately no second tier — the old sentence-vs-turn split ("\n" vs
+    /// "\n\n") rendered as blank lines between speakers, and downstream
+    /// consumers only ever need "one line = one utterance".
     private static let pauseRunDuration = 0.8
-    private static let turnRunDuration = 1.0
 
     /// Continuous speech (a monologue, dubbed dialogue with no audible gaps)
     /// can keep one turn open indefinitely. Once the finalized part of the
@@ -386,14 +386,16 @@ final class LongFormTranscriber {
     /// a single cut would leave the open turn still over the limit.
     private func sealOverlongOpenTurnLocked() {
         for _ in 0..<8 {
-            let openStart = finalizedText.range(of: "\n\n", options: .backwards)?.upperBound
+            let openStart = finalizedText.range(of: "\n", options: .backwards)?.upperBound
                 ?? finalizedText.startIndex
             let open = finalizedText[openStart...]
             guard open.count >= maxOpenTurnChars else { return }
             // Cut at the FIRST sentence boundary so a multi-sentence blob
-            // seals sentence by sentence, each becoming its own turn.
-            guard let terminator = open.firstIndex(where: { ".?!。？！\n".contains($0) }) else { return }
-            finalizedText.insert(contentsOf: "\n\n", at: finalizedText.index(after: terminator))
+            // seals sentence by sentence, each becoming its own turn. The
+            // open span never contains "\n" (it starts past the last one), so
+            // this insert can never produce a blank line.
+            guard let terminator = open.firstIndex(where: { ".?!。？！".contains($0) }) else { return }
+            finalizedText.insert(contentsOf: "\n", at: finalizedText.index(after: terminator))
         }
     }
 
@@ -410,11 +412,7 @@ final class LongFormTranscriber {
 
     private static func segmentedFinalText(_ result: SpeechTranscriber.Result, skippingAudioBefore cutoff: Double) -> String {
         var out = ""
-        var pendingBreak: String? = nil
-        func noteBreak(_ duration: Double) {
-            let mark = duration >= turnRunDuration ? "\n\n" : "\n"
-            if pendingBreak != "\n\n" { pendingBreak = mark }
-        }
+        var pendingBreak = false
         for run in result.text.runs {
             // Re-transcription of audio that was already finalized — skip.
             if let range = run.audioTimeRange, range.end.seconds <= cutoff + 0.05 {
@@ -424,15 +422,15 @@ final class LongFormTranscriber {
             let isSpoken = piece.contains { !$0.isWhitespace && !$0.isPunctuation }
             let duration = run.audioTimeRange.map { $0.end.seconds - $0.start.seconds } ?? 0
             if duration >= pauseRunDuration, isSpoken {
-                noteBreak(duration)
+                pendingBreak = true
             }
-            if isSpoken, let mark = pendingBreak {
-                out += mark
-                pendingBreak = nil
+            if isSpoken, pendingBreak {
+                out += "\n"
+                pendingBreak = false
             }
             out += piece
             if duration >= pauseRunDuration, !isSpoken {
-                noteBreak(duration)
+                pendingBreak = true
             }
         }
         return out
@@ -455,7 +453,10 @@ final class LongFormTranscriber {
             let substantial = text.contains { $0.isLetter || $0.isNumber }
             if substantial {
                 var piece = text
-                if finalizedText.isEmpty {
+                // Boundary collapse: a silence seal already wrote the "\n"
+                // this final opens with. Without this, seal + leading break
+                // stacked into a blank line between utterances.
+                if finalizedText.isEmpty || finalizedText.hasSuffix("\n") {
                     piece = String(piece.drop(while: { $0 == "\n" }))
                 }
                 finalizedText += piece

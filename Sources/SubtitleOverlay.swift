@@ -205,6 +205,36 @@ final class SubtitleOverlay {
         return result
     }
 
+    /// Interpreter-mode captions: styled runs concatenated verbatim — line
+    /// breaks arrive inside the run text, so a single line can mix a white
+    /// (committed) prefix with a dimmed still-moving remainder, hardening a
+    /// few words at a time like professional live captions.
+    func update(pieces: [(text: String, isFinal: Bool)]) {
+        guard armed else { return }
+        guard pieces.contains(where: { $0.text.contains(where: { $0.isLetter || $0.isNumber }) }) else { return }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let styled = NSMutableAttributedString()
+        for piece in pieces {
+            styled.append(NSAttributedString(string: piece.text, attributes: [
+                .font: font,
+                .foregroundColor: piece.isFinal ? NSColor.white : NSColor.white.withAlphaComponent(0.55),
+                .paragraphStyle: paragraph,
+            ]))
+        }
+        // Only a content CHANGE resets the idle clock and re-reveals the
+        // panel — repeated emits of the same text must not resurrect a
+        // caption that idle-faded during a pause.
+        guard styled.string != lastContent else { return }
+        lastContent = styled.string
+        lastContentAt = Date()
+        flashGen &+= 1
+        textField.attributedStringValue = styled
+        layout(for: styled.string)
+        reveal()
+    }
+
     /// Feeds the full accumulated transcript; the overlay shows only the tail,
     /// caption-style, and only once there is actual speech to show.
     func update(fullText: String) {

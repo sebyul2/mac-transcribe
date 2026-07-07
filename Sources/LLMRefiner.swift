@@ -116,6 +116,70 @@ enum LLMRefiner {
         )
     }
 
+    /// Pre-flights the translation path when an interpreter session starts:
+    /// a throwaway request refreshes the OAuth token, loads the Codex
+    /// instructions cache, and opens the shared HTTP/2 connection — so the
+    /// first real sentence doesn't pay for any of it.
+    static func warmUpTranslation(to language: String) {
+        translate("Hello.", to: language) { _ in }
+    }
+
+    /// One re-translation request for the live-translation engine: translate
+    /// the CURRENT text of one utterance, whole, from scratch. Deliberately
+    /// lightweight — no glossary, tiny prompt, zero reasoning effort — because
+    /// latency matters more than polish here. The immediately preceding
+    /// utterance (and its translation, when known) is passed as context so
+    /// pronouns and terminology stay consistent. `previousTranslation` is the
+    /// hypothesis currently on screen; instructing the model to reuse it
+    /// verbatim keeps consecutive hypotheses prefix-stable, which is what
+    /// local agreement needs to commit words early.
+    static func translate(
+        _ text: String,
+        to language: String,
+        context: String? = nil,
+        contextTranslation: String? = nil,
+        isFragment: Bool = false,
+        previousTranslation: String? = nil,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        let settings = Settings.shared
+        var prompt = """
+        You are a simultaneous interpreter. Translate the user's text into \(language). \
+        Output ONLY the translation — no quotes, no notes, no commentary.
+        """
+        if let context {
+            prompt += "\n\nPreceding source (context only — do NOT include it in the output): \(context)"
+            if let contextTranslation {
+                prompt += "\nIts translation (match its tone and terminology): \(contextTranslation)"
+            }
+        }
+        if isFragment {
+            prompt += "\n\nThe text is an unfinished utterance still being spoken; translate it naturally as-is, without completing it."
+        }
+        if let previousTranslation {
+            prompt += """
+
+
+            Your previous translation of this same, still-growing utterance (shown live on screen): \
+            \(previousTranslation)
+            The source has grown since. Reuse the previous translation's wording VERBATIM as the \
+            beginning of your output and extend it to cover the new material. Only change an \
+            existing word if the source revision made it factually wrong — never rephrase for \
+            style, tone, or flow. A stable prefix matters more than elegance.
+            """
+        }
+        request(
+            text: text,
+            baseURL: settings.llmBaseURL,
+            apiKey: settings.llmAPIKey,
+            model: settings.llmModel,
+            proto: settings.llmProtocol,
+            systemPrompt: prompt,
+            reasoningEffort: "none",
+            completion: completion
+        )
+    }
+
     /// Generate formal meeting minutes from a raw long-form transcript,
     /// using the configured provider and the user's glossary. `meetingDate`
     /// is the recording timestamp shown in the 회의 개요 table.
