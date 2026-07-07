@@ -217,13 +217,21 @@ final class SubtitleOverlay {
         let recent = Self.sentences(of: String(fullText.suffix(tailLength * 2))).suffix(maxLines)
         var tail = recent.joined(separator: "\n")
         if tail.count > tailLength {
-            // A single run-on sentence: fall back to a word-aligned tail and
-            // let the label wrap it.
+            // A single run-on sentence: fall back to a plain tail and let the
+            // label wrap it. Snap to a word boundary only when one appears
+            // near the cut — the old unconditional "drop through the first
+            // space" left a single character (or nothing at all) whenever the
+            // truncated chunk's only space sat near its end, which rendered
+            // as an empty black box mid-speech.
             tail = String(tail.suffix(tailLength))
-            if let space = tail.firstIndex(of: " ") {
-                tail = String(tail[tail.index(after: space)...])
+            if let space = tail.firstIndex(of: " "),
+               tail.distance(from: tail.startIndex, to: space) <= 16 {
+                let afterSpace = String(tail[tail.index(after: space)...])
+                if afterSpace.count >= tailLength / 4 { tail = afterSpace }
             }
         }
+        // Never replace a readable caption with an empty or token-sized one.
+        guard tail.contains(where: { $0.isLetter || $0.isNumber }) else { return }
         guard tail != lastContent else { return }
         lastContent = tail
         lastContentAt = Date()
@@ -259,16 +267,22 @@ final class SubtitleOverlay {
         // Korean sentence before its final particle) reads terribly.
         let maxTextWidth = min(vis.width * 0.72, 1000) - hPadding * 2
 
-        // Measure with the field's OWN metrics: boundingRect reports the
-        // ideal typographic width, which runs a couple of points narrower
-        // than what NSTextField actually needs — so the last character of
-        // every line wrapped onto a line of its own ("뭐하고 있나 / 요").
-        // The field's content is already set when layout() runs.
-        let fitting = textField.sizeThatFits(
-            NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude))
+        // Measure with boundingRect for the HEIGHT (sizeThatFits answers with
+        // maximumNumberOfLines' worth of height regardless of content, which
+        // gave a one-line caption a four-line box with the text sunk to the
+        // bottom). boundingRect's width runs a couple of points narrower than
+        // what NSTextField actually renders — that used to wrap every line's
+        // last character — so measure against a slack-reduced width and hand
+        // the field the slack back.
+        let slack: CGFloat = 8
+        let bounding = (text as NSString).boundingRect(
+            with: NSSize(width: maxTextWidth - slack, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        let textHeight = min(ceil(fitting.height), lineHeight * CGFloat(renderedLineCap))
-        let textWidth = min(maxTextWidth, max(160, ceil(fitting.width) + 4))
+        let textHeight = min(ceil(bounding.height), lineHeight * CGFloat(renderedLineCap))
+        let textWidth = min(maxTextWidth, max(160, ceil(bounding.width) + slack))
 
         let boxWidth = textWidth + hPadding * 2
         let boxHeight = textHeight + vPadding * 2
