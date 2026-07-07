@@ -374,12 +374,14 @@ final class LongFormTranscriber {
     private static let pauseRunDuration = 0.8
 
     /// Continuous speech (a monologue, dubbed dialogue with no audible gaps)
-    /// can keep one turn open indefinitely. Once the finalized part of the
-    /// open turn grows past this, seal it at its LAST sentence boundary — in
-    /// practice as soon as a sentence completes. Keeping the open turn to
-    /// roughly the sentence being spoken is what keeps the interpreter's LLM
-    /// work anchored to the present instead of re-rendering the past.
-    private let maxOpenTurnChars = 25
+    /// can keep one turn open indefinitely; once the finalized part of the
+    /// open turn grows past this, seal it at a sentence boundary. This used
+    /// to be 25 — tuned for an engine that committed captions only at seals —
+    /// but the translation engine now commits words WITHIN the open turn
+    /// (local agreement), so tiny seals bought nothing and cost a lot: each
+    /// fragment translated in isolation ("그것", "토론회") reads like machine
+    /// salad. Longer turns give the translator whole sentences.
+    private let maxOpenTurnChars = 70
 
     /// Called with stateLock held, after appending finalized text. Loops:
     /// a re-transcribed or long final can land several sentences at once, and

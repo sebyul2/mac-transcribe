@@ -140,11 +140,15 @@ enum LLMRefiner {
         contextTranslation: String? = nil,
         isFragment: Bool = false,
         previousTranslation: String? = nil,
+        effort: String = "none",
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         let settings = Settings.shared
         var prompt = """
         You are a simultaneous interpreter. Translate the user's text into \(language). \
+        The text comes from live speech recognition: it may contain filler sounds \
+        (uh, 어, 음, 那个, 呃), false starts, and recognition noise. Translate the \
+        intended meaning into clean, natural \(language) and drop the fillers. \
         Output ONLY the translation — no quotes, no notes, no commentary.
         """
         if let context {
@@ -175,7 +179,7 @@ enum LLMRefiner {
             model: settings.llmModel,
             proto: settings.llmProtocol,
             systemPrompt: prompt,
-            reasoningEffort: "none",
+            reasoningEffort: effort,
             completion: completion
         )
     }
