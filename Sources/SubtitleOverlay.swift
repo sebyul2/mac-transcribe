@@ -250,11 +250,14 @@ final class SubtitleOverlay {
         guard armed else { return }
         // No captions until something was actually said.
         guard fullText.contains(where: { $0.isLetter || $0.isNumber }) else { return }
-        // Real-subtitle line breaking: the last few sentences, one per line,
-        // so a continuing speech wraps at utterance boundaries instead of
-        // stretching into one endless line.
-        let recent = Self.sentences(of: String(fullText.suffix(tailLength * 2))).suffix(maxLines)
-        var tail = recent.joined(separator: "\n")
+        // The transcriber already breaks the text into one utterance per
+        // "\n". Split on those FIRST, take the last few, then re-join with
+        // "\n". This prevents the old path where sentences() re-split and
+        // re-joined, doubling line breaks whenever the raw text already
+        // contained "\n" — the caption showed more spacing than the
+        // transcript window as a result.
+        let lines = fullText.split(separator: "\n", omittingEmptySubsequences: true)
+        var tail = lines.suffix(maxLines).joined(separator: "\n")
         if tail.count > tailLength {
             // A single run-on sentence: fall back to a plain tail and let the
             // label wrap it. Snap to a word boundary only when one appears
