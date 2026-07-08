@@ -132,6 +132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowItem.image = menuIcon("text.rectangle.page")
         menu.addItem(windowItem)
 
+        let folderItem = NSMenuItem(title: "Open Saved Folder", action: #selector(openSavedFolder), keyEquivalent: "")
+        folderItem.target = self
+        folderItem.image = menuIcon("folder")
+        menu.addItem(folderItem)
+
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -823,6 +828,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             startLockedRecording()
         }
+    }
+
+    @objc private func openSavedFolder() {
+        let dir = Self.transcriptsDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
     }
 
     @objc private func openSettings() {
