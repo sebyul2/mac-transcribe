@@ -249,68 +249,74 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Engine tab (LLM)
 
     private func buildEngineTab(_ view: NSView) {
+        let desc = NSTextField(wrappingLabelWithString:
+            "The LLM engine is used for Live Translation and Meeting Notes generation. "
+            + "Configure the provider and model below, then Test to verify.")
+        desc.font = .systemFont(ofSize: 11); desc.textColor = .secondaryLabelColor
+        place(desc, x: 20, top: 12, w: 440, h: 30, in: view)
+
         func style(_ field: NSTextField, top: CGFloat) {
             place(field, x: fieldX, top: top, w: fieldW, in: view)
             field.isEditable = true; field.isSelectable = true
             field.isBezeled = true; field.bezelStyle = .roundedBezel
         }
 
-        _ = label("Provider:", top: 20, in: view)
+        _ = label("Provider:", top: 50, in: view)
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
         for provider in LLMProvider.all {
             providerPopup.addItem(withTitle: provider.displayName)
             providerPopup.lastItem?.representedObject = provider.id
         }
-        place(providerPopup, x: fieldX, top: 18, w: fieldW, in: view)
+        place(providerPopup, x: fieldX, top: 48, w: fieldW, in: view)
 
-        _ = label("Model:", top: 56, in: view)
-        place(modelPopup, x: fieldX, top: 54, w: fieldW, in: view)
-        style(modelField, top: 56)
+        _ = label("Model:", top: 86, in: view)
+        place(modelPopup, x: fieldX, top: 84, w: fieldW, in: view)
+        style(modelField, top: 86)
         modelField.placeholderString = "gpt-4o-mini"
 
         baseURLLabel.stringValue = "API Base URL:"
         baseURLLabel.alignment = .right
-        place(baseURLLabel, x: 20, top: 92, w: 120, h: 22, in: view)
-        style(baseURLField, top: 92)
+        place(baseURLLabel, x: 20, top: 122, w: 120, h: 22, in: view)
+        style(baseURLField, top: 122)
         baseURLField.placeholderString = "https://api.openai.com/v1"
 
-        apiKeyLabel = label("Account:", top: 128, in: view)
+        apiKeyLabel = label("Account:", top: 158, in: view)
         apiKeyStatusLabel.font = .systemFont(ofSize: 11)
         apiKeyStatusLabel.textColor = .secondaryLabelColor
-        place(apiKeyStatusLabel, x: fieldX, top: 128, w: fieldW, h: 22, in: view)
+        place(apiKeyStatusLabel, x: fieldX, top: 158, w: fieldW, h: 22, in: view)
 
         chatgptAuthButton.title = "Sign in with ChatGPT"
         chatgptAuthButton.bezelStyle = .rounded
         chatgptAuthButton.target = self
         chatgptAuthButton.action = #selector(chatgptAuthTapped)
-        place(chatgptAuthButton, x: fieldX, top: 156, w: 200, h: 30, in: view)
+        place(chatgptAuthButton, x: fieldX, top: 186, w: 200, h: 30, in: view)
 
-        _ = label("Glossary:", top: 200, in: view)
+        _ = label("Glossary:", top: 230, in: view)
         glossaryStatusLabel.font = .systemFont(ofSize: 11)
         glossaryStatusLabel.textColor = .secondaryLabelColor
         glossaryStatusLabel.lineBreakMode = .byTruncatingMiddle
-        place(glossaryStatusLabel, x: fieldX, top: 200, w: 140, h: 22, in: view)
+        place(glossaryStatusLabel, x: fieldX, top: 230, w: 140, h: 22, in: view)
         let chooseButton = NSButton(title: "Attach…", target: self, action: #selector(chooseGlossaryTapped))
         chooseButton.bezelStyle = .rounded
-        place(chooseButton, x: fieldX + 146, top: 196, w: 82, height: 28, in: view)
+        place(chooseButton, x: fieldX + 146, top: 226, w: 82, height: 28, in: view)
         let editButton = NSButton(title: "Edit", target: self, action: #selector(editGlossaryTapped))
         editButton.bezelStyle = .rounded
-        place(editButton, x: fieldX + 232, top: 196, w: 68, height: 28, in: view)
+        place(editButton, x: fieldX + 232, top: 226, w: 68, height: 28, in: view)
 
         statusLabel.alignment = .left
         statusLabel.maximumNumberOfLines = 2
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.textColor = .secondaryLabelColor
-        place(statusLabel, x: 20, top: 244, w: 440, h: 40, in: view)
+        place(statusLabel, x: 20, top: 274, w: 440, h: 40, in: view)
 
         let testButton = NSButton(title: "Test", target: self, action: #selector(testTapped))
         testButton.bezelStyle = .rounded
-        place(testButton, x: 260, top: 300, w: 90, h: 32, in: view)
+        place(testButton, x: 260, top: 324, w: 90, h: 32, in: view)
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveTapped))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
-        place(saveButton, x: 360, top: 300, w: 100, h: 32, in: view)
+        place(saveButton, x: 360, top: 324, w: 100, h: 32, in: view)
     }
 
     /// Convenience overload accepting a pixel height for buttons.
