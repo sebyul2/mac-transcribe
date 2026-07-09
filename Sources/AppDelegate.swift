@@ -513,15 +513,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isLockedRecording else { return }
         isLockedRecording = false
         lockStopping = false
-        if let activity = sleepActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            sleepActivity = nil
-        }
+        // Keep the sleep-prevention activity alive: meeting notes and
+        // transcript refinement run after the recording ends, and closing
+        // the lid mid-generation kills the network request. The activity
+        // is released by endPostRecordingActivity() when all post-processing
+        // finishes (or immediately when none is needed).
         transcriptWindow.setRecording(false)
         subtitles.hide()
         translator.teardown()
+        postRecordingTasks = 0
         finishLockedSession(with: text)
+        // If no post-recording tasks were started (no refinement, no notes),
+        // release the sleep-prevention activity now; otherwise each task
+        // releases it when it finishes.
+        if postRecordingTasks == 0 {
+            if let activity = sleepActivity {
+                ProcessInfo.processInfo.endActivity(activity)
+                sleepActivity = nil
+            }
+        }
         rebuildMenu()
+    }
+
+    /// How many post-recording tasks (refinement, meeting notes) are still
+    /// running. The sleep-prevention activity stays alive until this hits 0.
+    private var postRecordingTasks = 0
+
+    private func beginPostRecordingTask() { postRecordingTasks += 1 }
+
+    private func endPostRecordingTask() {
+        postRecordingTasks = max(0, postRecordingTasks - 1)
+        if postRecordingTasks == 0 {
+            if let activity = sleepActivity {
+                ProcessInfo.processInfo.endActivity(activity)
+                sleepActivity = nil
+            }
+        }
     }
 
     private func startRecording() {
@@ -643,6 +670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (glossary included in the prompt) and saves them as notes-<stamp>.md.
     /// Failures only log — the transcript file is already safe on disk.
     private func generateMeetingNotes(from transcript: String, stamp: String, in dir: URL) {
+        beginPostRecordingTask()
         NSLog("MacTranscribe[App]: generating meeting notes chars=\(transcript.count)")
         SpeechService.diag("meeting notes generating chars=\(transcript.count)")
         // Minutes for a long meeting take a few minutes to write; without a
@@ -672,6 +700,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     SpeechService.diag("meeting notes FAILED: \(error.localizedDescription)")
                     self.transcriptWindow.setStatus("Meeting notes failed — transcript is saved")
                 }
+                self.endPostRecordingTask()
             }
         }
         if provider == "claude" {
@@ -686,18 +715,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// network, quota, a bad chunk — simply leaves the original content.
     /// Long transcripts are refined in chunks to stay inside response limits.
     private func refineTranscriptFile(_ text: String, at url: URL) {
+        beginPostRecordingTask()
         let chunks = Self.chunkForRefinement(text, limit: 3000)
         NSLog("MacTranscribe[App]: refining transcript in \(chunks.count) chunk(s)")
         var refined: [String] = []
         var anySuccess = false
         func processNext(_ index: Int) {
             if index >= chunks.count {
-                guard anySuccess else { return }
-                let output = refined.joined(separator: " ")
-                if Self.isMeaningfulTranscript(output) {
-                    try? output.write(to: url, atomically: true, encoding: .utf8)
-                    NSLog("MacTranscribe[App]: refined transcript written chars=\(output.count)")
+                if anySuccess {
+                    let output = refined.joined(separator: " ")
+                    if Self.isMeaningfulTranscript(output) {
+                        try? output.write(to: url, atomically: true, encoding: .utf8)
+                        NSLog("MacTranscribe[App]: refined transcript written chars=\(output.count)")
+                    }
                 }
+                self.endPostRecordingTask()
                 return
             }
             LLMRefiner.refine(chunks[index]) { result in
