@@ -41,6 +41,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let micRadio = NSButton(radioButtonWithTitle: "Microphone", target: nil, action: nil)
     private let systemRadio = NSButton(radioButtonWithTitle: "System audio (what the Mac plays)", target: nil, action: nil)
     private let meetingNotesCheck = NSButton(checkboxWithTitle: "Generate meeting notes after a recording", target: nil, action: nil)
+    private let notesProviderPopup = NSPopUpButton()
 
     // Engine (LLM)
     private let providerPopup = NSPopUpButton()
@@ -221,11 +222,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         meetingNotesCheck.target = self
         meetingNotesCheck.action = #selector(meetingNotesChanged)
         place(meetingNotesCheck, x: 20, top: 120, w: 440, h: 20, in: view)
+
+        _ = label("Provider:", top: 152, in: view)
+        notesProviderPopup.addItem(withTitle: "Engine (ChatGPT / OpenAI)")
+        notesProviderPopup.lastItem?.representedObject = "engine"
+        notesProviderPopup.addItem(withTitle: "Claude (via CLI)")
+        notesProviderPopup.lastItem?.representedObject = "claude"
+        notesProviderPopup.target = self
+        notesProviderPopup.action = #selector(notesProviderChanged)
+        place(notesProviderPopup, x: fieldX, top: 150, w: fieldW - 36, in: view)
+
+        let infoButton = NSButton()
+        infoButton.bezelStyle = .helpButton
+        infoButton.title = ""
+        infoButton.target = self
+        infoButton.action = #selector(notesProviderInfoTapped)
+        place(infoButton, x: fieldX + fieldW - 30, top: 150, w: 26, h: 26, in: view)
+
         let notesNote = NSTextField(wrappingLabelWithString:
-            "After a recording ends, the Engine writes structured minutes (attendees, discussion, "
-            + "decisions, action items) as Markdown. Off during Live Translation.")
+            "After a recording ends, structured minutes (attendees, discussion, "
+            + "decisions, action items) are generated as Markdown. Off during Live Translation.")
         notesNote.font = .systemFont(ofSize: 11); notesNote.textColor = .secondaryLabelColor
-        place(notesNote, x: 40, top: 142, w: 420, h: 40, in: view)
+        place(notesNote, x: 20, top: 186, w: 440, h: 40, in: view)
     }
 
     // MARK: - Engine tab (LLM)
@@ -316,6 +334,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off
         meetingNotesCheck.state = s.meetingNotesEnabled ? .on : .off
+        selectByRepresented(notesProviderPopup, s.meetingNotesProvider)
 
         let provider = s.llmProvider
         if let index = LLMProvider.all.firstIndex(where: { $0.id == provider.id }) {
@@ -425,10 +444,39 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
     @objc private func meetingNotesChanged() {
         Settings.shared.meetingNotesEnabled = meetingNotesCheck.state == .on
-        if Settings.shared.meetingNotesEnabled && !Settings.shared.llmConfigured {
+        let provider = represented(notesProviderPopup)
+        let needsEngine = provider != "claude"
+        if Settings.shared.meetingNotesEnabled && needsEngine && !Settings.shared.llmConfigured {
             selectTab("Engine")
         }
         onSettingsChanged?()
+    }
+
+    @objc private func notesProviderChanged() {
+        Settings.shared.meetingNotesProvider = represented(notesProviderPopup)
+        onSettingsChanged?()
+    }
+
+    @objc private func notesProviderInfoTapped() {
+        let alert = NSAlert()
+        alert.messageText = "Meeting Notes Provider"
+        alert.informativeText = """
+        Engine (ChatGPT / OpenAI)
+        Engine 탭에서 설정한 LLM으로 회의록을 생성합니다. ChatGPT 구독(OAuth) 또는 OpenAI API 키가 필요합니다.
+
+        Claude (via CLI)
+        로컬에 설치된 Claude Code CLI(`claude -p`)를 사용합니다. Claude Max/Pro 구독으로 동작하며 별도 API 키가 필요 없습니다.
+
+        사전 준비:
+        1. Claude Code 설치 (claude.ai/download)
+        2. 터미널에서 `claude` 실행 → 로그인
+        3. 이 설정에서 Claude 선택
+
+        Claude CLI가 설치되지 않았거나 로그인되지 않은 상태면 회의록 생성이 실패하고, 전사 원문은 그대로 보존됩니다.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func selectTab(_ identifier: String) {

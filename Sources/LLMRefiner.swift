@@ -116,6 +116,73 @@ enum LLMRefiner {
         )
     }
 
+    /// Generate meeting notes via `claude -p`, piping the prompt + transcript
+    /// through stdin (avoids ARG_MAX on long transcripts). Runs on a background
+    /// queue; the completion fires on that queue — callers bounce to main.
+    static func generateMeetingNotesViaClaude(
+        from transcript: String,
+        meetingDate: String,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        let prompt = meetingNotesPrompt(meetingDate: meetingDate)
+        let input = prompt + "\n\n" + transcript
+        DispatchQueue.global(qos: .userInitiated).async {
+            let claudePath = Self.claudeCLIPath()
+            guard let claudePath else {
+                completion(.failure(RefineError(message: "claude CLI not found — install Claude Code and sign in")))
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: claudePath)
+            process.arguments = ["-p", "--output-format", "text"]
+            let stdin = Pipe()
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardInput = stdin
+            process.standardOutput = stdout
+            process.standardError = stderr
+            do {
+                try process.run()
+                if let data = input.data(using: .utf8) {
+                    stdin.fileHandleForWriting.write(data)
+                }
+                stdin.fileHandleForWriting.closeFile()
+                process.waitUntilExit()
+                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                if process.terminationStatus == 0,
+                   let output = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !output.isEmpty {
+                    completion(.success(output))
+                } else {
+                    let errMsg = String(data: errData, encoding: .utf8) ?? "exit \(process.terminationStatus)"
+                    completion(.failure(RefineError(message: "claude CLI failed: \(errMsg)")))
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    /// Returns `true` when the `claude` CLI is installed and appears to be
+    /// signed in (exits 0 on `claude --version`).
+    static func isClaudeAvailable() -> Bool {
+        claudeCLIPath() != nil
+    }
+
+    private static func claudeCLIPath() -> String? {
+        let candidates = [
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/Applications/cmux.app/Contents/Resources/bin/claude",
+            ProcessInfo.processInfo.environment["HOME"].map { $0 + "/.claude/local/claude" },
+        ].compactMap { $0 }
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
     /// Pre-flights the translation path when an interpreter session starts:
     /// a throwaway request refreshes the OAuth token, loads the Codex
     /// instructions cache, and opens the shared HTTP/2 connection — so the

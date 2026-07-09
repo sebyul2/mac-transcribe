@@ -75,6 +75,7 @@ final class Settings {
         static let longTriggerKeyMods = "longTriggerKeyModifiers"
         static let meetingNotes = "meetingNotesEnabled"
         static let interpreterTarget = "interpreterTargetLanguage"
+        static let meetingNotesProvider = "meetingNotesProvider"
         static let interpreterSource = "interpreterSourceLanguage"
         static let liveTranslation = "liveTranslationEnabled"
         static let audioSource = "lockedAudioSource"
@@ -233,6 +234,13 @@ final class Settings {
     var meetingNotesEnabled: Bool {
         get { defaults.bool(forKey: Keys.meetingNotes) }
         set { defaults.set(newValue, forKey: Keys.meetingNotes) }
+    }
+
+    /// Which provider generates meeting notes: "engine" uses the configured
+    /// LLM Engine (ChatGPT/OpenAI/custom), "claude" shells out to `claude -p`.
+    var meetingNotesProvider: String {
+        get { defaults.string(forKey: Keys.meetingNotesProvider) ?? "engine" }
+        set { defaults.set(newValue, forKey: Keys.meetingNotesProvider) }
     }
 
     /// Show caption-style subtitles at the bottom of the screen during a

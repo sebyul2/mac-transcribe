@@ -648,8 +648,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Minutes for a long meeting take a few minutes to write; without a
         // visible status users read the wait as "notes were never made" (and
         // may quit the app mid-generation, which really does lose them).
-        transcriptWindow.setStatus("Generating meeting notes… (takes a few minutes; keep the app running)")
-        LLMRefiner.generateMeetingNotes(from: transcript, meetingDate: Self.meetingDateString(from: stamp)) { [weak self] result in
+        let provider = settings.meetingNotesProvider
+        let providerLabel = provider == "claude" ? "Claude" : "LLM"
+        transcriptWindow.setStatus("Generating meeting notes via \(providerLabel)… (takes a few minutes; keep the app running)")
+        let meetingDate = Self.meetingDateString(from: stamp)
+        let handler: (Result<String, Error>) -> Void = { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
@@ -670,6 +673,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.transcriptWindow.setStatus("Meeting notes failed — transcript is saved")
                 }
             }
+        }
+        if provider == "claude" {
+            LLMRefiner.generateMeetingNotesViaClaude(from: transcript, meetingDate: meetingDate, completion: handler)
+        } else {
+            LLMRefiner.generateMeetingNotes(from: transcript, meetingDate: meetingDate, completion: handler)
         }
     }
 
@@ -778,7 +786,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // raw text so neither task waits on the other). Interpreter
                 // sessions save only the conversation — never minutes, even
                 // when the option is on.
-                if settings.meetingNotesEnabled && settings.llmConfigured && lockMode == .meeting {
+                let notesReady = settings.meetingNotesProvider == "claude"
+                    ? LLMRefiner.isClaudeAvailable()
+                    : settings.llmConfigured
+                if settings.meetingNotesEnabled && notesReady && lockMode == .meeting {
                     generateMeetingNotes(from: final, stamp: stamp, in: dir)
                 }
             } catch {
