@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let translator = TranslationEngine()
     /// Voices translated utterances (continuous TTS with optional ducking).
     private let speechOutput = SpeechOutput()
+    /// On-device translation backend (Apple Translation framework).
+    private let appleTranslator = AppleTranslator()
 
     // MARK: DeepL Voice streaming state
     //
@@ -468,9 +470,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isLockedRecording else { return }
         // The Live Translation toggle is the master switch; the Engine tab's
         // Translation provider decides who does the work and what "ready"
-        // means (DeepL: its API key; LLM: the Meeting account).
-        let translationReady = settings.liveTranslationEnabled &&
-            (settings.deeplEnabled ? settings.deeplConfigured : settings.llmConfigured)
+        // means (Apple: nothing at all; DeepL: its API key; LLM: the
+        // Meeting account).
+        let providerReady = settings.appleTranslationEnabled
+            || (settings.deeplEnabled && settings.deeplConfigured)
+            || (!settings.deeplEnabled && settings.llmConfigured)
+        let translationReady = settings.liveTranslationEnabled && providerReady
         let mode: LockMode = translationReady ? .interpreter : .meeting
         // Clear any streaming-mode residue from the previous session; the
         // voice branch below re-arms it when applicable.
@@ -486,7 +491,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speechOutput.languageTag = SpeechOutput.languageTag(
                 deepl: settings.deeplEnabled ? settings.deeplTargetLang : "",
                 llm: settings.interpreterTargetLanguage)
-            if settings.deeplEnabled && settings.deeplConfigured && settings.deeplVoiceEnabled {
+            translator.appleTranslator = nil
+            if settings.appleTranslationEnabled {
+                // On-device path: by construction NO network request is made
+                // for translation — no LLM warm-up, no DeepL session, nothing.
+                translator.useDeepL = false
+                translator.targetLanguage = settings.interpreterTargetLanguage
+                translator.sourceLanguage = settings.interpreterSourceLanguage
+                translator.appleTranslator = appleTranslator
+                let source = AppleTranslator.localeLanguage(forPrompt: settings.interpreterSourceLanguage)
+                let target = AppleTranslator.localeLanguage(forPrompt: settings.interpreterTargetLanguage)
+                    ?? Locale.Language(identifier: "en")
+                appleTranslator.start(source: source, target: target) { [weak self] ready in
+                    guard let self, !ready else { return }
+                    self.transcriptWindow.setStatus("On-device translation unavailable for this pair — captions show the original")
+                }
+            } else if settings.deeplEnabled && settings.deeplConfigured && settings.deeplVoiceEnabled {
                 // DeepL Voice streaming: audio goes straight to DeepL, which
                 // does its own ASR + segmentation + translation. The local
                 // recognizer never starts, so none of its fragment/ending
@@ -561,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let interpLabel: String
         if mode == .interpreter {
             let via = longForm.bypassAnalyzer ? "DeepL Voice"
+                : translator.appleTranslator != nil ? "Apple (on-device)"
                 : translator.useDeepL ? "DeepL" : "LLM"
             let target = (longForm.bypassAnalyzer || translator.useDeepL)
                 ? settings.deeplTargetLang : settings.interpreterTargetLanguage
@@ -607,6 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcriptWindow.setRecording(false)
         subtitles.hide()
         translator.teardown()
+        appleTranslator.stop()
         speechOutput.endSession()
         // Streaming mode: the voice session owns the transcript (the local
         // recognizer never ran); stop it and save what it heard.

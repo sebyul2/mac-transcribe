@@ -203,9 +203,9 @@ final class Settings {
 
     // MARK: - DeepL
 
-    /// Which engine drives live translation: "llm" (the Engine LLM),
-    /// "deepl" (DeepL text API), or "deepl-voice" (DeepL Voice streaming).
-    /// Selected in Settings ▸ Engine ▸ Translation.
+    /// Which engine drives live translation: "apple" (on-device, free — the
+    /// default), "llm" (the Engine LLM), or "deepl-voice" (DeepL Voice
+    /// streaming). Selected in Settings ▸ Engine ▸ Translation.
     var translationProvider: String {
         get {
             // DeepL always means Voice streaming now — the text-request DeepL
@@ -218,10 +218,12 @@ final class Settings {
             if defaults.bool(forKey: "deeplVoiceEnabled") || defaults.bool(forKey: Keys.deeplEnabled) {
                 return "deepl-voice"
             }
-            return "llm"
+            return "apple"
         }
         set { defaults.set(newValue, forKey: "translationProvider") }
     }
+
+    var appleTranslationEnabled: Bool { translationProvider == "apple" }
 
     /// Bridges kept so call sites read naturally.
     var deeplEnabled: Bool { translationProvider.hasPrefix("deepl") }

@@ -70,6 +70,12 @@ final class TranslationEngine {
     var deeplTargetLang = "KO"
     var deeplSourceLang = ""
 
+    /// When set, translations go through Apple's on-device Translation
+    /// framework: free, offline, tens of milliseconds — and by design NO
+    /// network request of any kind leaves the machine for translation.
+    /// The caller starts/owns the translator session.
+    var appleTranslator: AppleTranslator?
+
     /// Fired once per utterance with its translation, the first time one is
     /// worth speaking: at seal time when a draft exists, else when the
     /// definitive translation lands. The speech pipeline (SpeechOutput)
@@ -161,6 +167,10 @@ final class TranslationEngine {
     private struct Request {
         let id: Int
         let source: String
+    }
+
+    private struct OnDeviceError: LocalizedError {
+        var errorDescription: String? { "on-device translation unavailable" }
     }
 
     private var utterances: [Utterance] = []
@@ -298,7 +308,18 @@ final class TranslationEngine {
         let u = utterances[i]
         liveRequest = Request(id: u.id, source: u.source)
         let gen = generation
-        if useDeepL {
+        if let apple = appleTranslator {
+            // On-device: nothing touches the network, ever.
+            apple.translate(u.source) { [weak self] text in
+                DispatchQueue.main.async {
+                    if let text {
+                        self?.completeLive(.success(text), gen: gen)
+                    } else {
+                        self?.completeLive(.failure(OnDeviceError()), gen: gen)
+                    }
+                }
+            }
+        } else if useDeepL {
             SpeechService.diag("deepl live -> \(deeplTargetLang) chars=\(u.source.count)")
             DeepLTranslator.translate(u.source, targetLang: deeplTargetLang,
                                        sourceLang: deeplSourceLang.isEmpty ? nil : deeplSourceLang,
@@ -327,7 +348,28 @@ final class TranslationEngine {
         let u = utterances[i]
         qualityRequest = Request(id: u.id, source: u.source)
         let gen = generation
-        if useDeepL {
+        if let apple = appleTranslator {
+            // Deterministic like DeepL: a draft that covered the sealed
+            // source IS the final; otherwise one on-device pass, no network.
+            if case .draft(let text, _) = u.translation {
+                utterances[i].translation = .final(text: text)
+                utterances[i].translatedSource = u.source
+                qualityRequest = nil
+                emitSpeakable(text, id: u.id)
+                render()
+                schedule()
+                return
+            }
+            apple.translate(u.source) { [weak self] text in
+                DispatchQueue.main.async {
+                    if let text {
+                        self?.completeQuality(.success(text), gen: gen)
+                    } else {
+                        self?.completeQuality(.failure(OnDeviceError()), gen: gen)
+                    }
+                }
+            }
+        } else if useDeepL {
             // DeepL is deterministic — the quality pass would return the same
             // result as the live pass, so just promote the draft directly.
             if case .draft(let text, _) = u.translation {

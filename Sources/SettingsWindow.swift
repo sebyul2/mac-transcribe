@@ -318,7 +318,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         _ = label("Provider:", top: 264, in: view)
         transProviderPopup.target = self
         transProviderPopup.action = #selector(transProviderChanged)
-        for (id, title) in [("llm", "LLM (uses the Meeting account)"),
+        for (id, title) in [("apple", "Apple Translation (on-device, free)"),
+                            ("llm", "LLM (uses the Meeting account)"),
                             ("deepl-voice", "DeepL Voice (streaming)")] {
             transProviderPopup.addItem(withTitle: title)
             transProviderPopup.lastItem?.representedObject = id
@@ -841,12 +842,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func applyTranslationVisibility() {
-        let llm = Settings.shared.translationProvider == "llm"
-        transModelLabel.isHidden = !llm
-        transModelPopup.isHidden = !llm
-        deeplKeyLabel.isHidden = llm
-        deeplKeyField.isHidden = llm
-        deeplTestButton.isHidden = llm
+        let provider = Settings.shared.translationProvider
+        // Apple needs nothing configured; LLM shows a model; DeepL shows a key.
+        transModelLabel.isHidden = provider != "llm"
+        transModelPopup.isHidden = provider != "llm"
+        deeplKeyLabel.isHidden = provider != "deepl-voice"
+        deeplKeyField.isHidden = provider != "deepl-voice"
+        deeplTestButton.isHidden = provider != "deepl-voice"
     }
 
     // MARK: - Engine shared actions
