@@ -67,7 +67,19 @@ final class LongFormTranscriber {
     /// Decaying envelope of recent levels; the silence threshold adapts to it
     /// so dialogue over background music still registers.
     private var levelEnvelope: Float = 0
-    private let utteranceSilenceGap: TimeInterval = 0.35
+    /// Silence long enough to end an utterance mid-sentence. Japanese (and
+    /// spoken Korean) pause naturally after particles and before final
+    /// endings; 0.35 s cut sentences apart there, chopping the trailing
+    /// ending off and feeding fragments to the translator.
+    private let utteranceSilenceGap: TimeInterval = 0.7
+    /// When the hypothesis already ends in sentence-final punctuation the
+    /// sentence is really over — seal faster for interpreter responsiveness.
+    private let sentenceDoneSilenceGap: TimeInterval = 0.45
+    /// Don't finalize while the recognizer is still writing: a finalize
+    /// issued the instant the level drops commits the hypothesis BEFORE the
+    /// last ~0.3 s of audio became text, which is how utterance endings got
+    /// lost. Wait for the hypothesis ink to dry.
+    private let volatileInkDry: TimeInterval = 0.3
     /// Audio-thread timestamp of the last finalize request (pacing).
     private var lastFinalizeAt = Date.distantPast
     /// Finalization is only ever requested when the recognizer has stopped
@@ -82,21 +94,36 @@ final class LongFormTranscriber {
     private func trackVoiceActivity(_ level: Float) {
         // ~20 ms per buffer; 0.995^n halves the envelope in roughly 3 s.
         levelEnvelope = max(level, levelEnvelope * 0.995)
-        let threshold = max(0.04, levelEnvelope * 0.2)
+        // Keep the adaptive threshold LOW relative to the envelope: on a loud
+        // source (system audio peaks at 1.0) a 0.2× factor put the threshold
+        // at 0.2, above the energy of soft utterance endings (です/ます tails),
+        // so the silence clock started while the speaker was still finishing
+        // the word — and the ending got sealed off mid-syllable.
+        let threshold = max(0.03, levelEnvelope * 0.08)
         let now = Date()
         maybeRestartMutePipeline(now: now)
         if level >= threshold {
             voiceActive = true
             lastVoiceAt = now
-        } else if voiceActive, now.timeIntervalSince(lastVoiceAt) >= utteranceSilenceGap {
-            // Real speech pause: the utterance is over. Finalize immediately
-            // and SEAL the turn behind it, so its quality translation runs
-            // now — not when the next speaker happens to start.
-            voiceActive = false
-            SpeechService.diag("longform silence -> finalize+seal (envelope=\(levelEnvelope))")
-            lastFinalizeAt = now
-            requestFinalize(sealTurnAfter: true)
-            return
+        } else if voiceActive {
+            // A real speech pause ends the utterance — but only once the
+            // recognizer has caught up (ink dry) and the pause is long enough.
+            // A hypothesis already ending in sentence-final punctuation seals
+            // on the shorter gap; an unfinished one gets the full pause so
+            // mid-sentence breathing doesn't shatter sentences into fragments.
+            stateLock.lock()
+            let trailing = volatileText.last(where: { !$0.isWhitespace })
+            let inkDry = now.timeIntervalSince(volatileChangedAt) >= volatileInkDry
+            stateLock.unlock()
+            let sentenceDone = trailing.map { "。.?？!！…".contains($0) } ?? false
+            let gap = sentenceDone ? sentenceDoneSilenceGap : utteranceSilenceGap
+            if now.timeIntervalSince(lastVoiceAt) >= gap, inkDry {
+                voiceActive = false
+                SpeechService.diag("longform silence \(String(format: "%.2f", now.timeIntervalSince(lastVoiceAt)))s -> finalize+seal (sentenceDone=\(sentenceDone) envelope=\(levelEnvelope))")
+                lastFinalizeAt = now
+                requestFinalize(sealTurnAfter: true)
+                return
+            }
         }
         // Stale-hypothesis finalize: the recognizer hasn't revised its
         // volatile text for a while, so committing it loses nothing — this
