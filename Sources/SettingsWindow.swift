@@ -382,7 +382,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         liveTranslationCheck.state = s.liveTranslationEnabled ? .on : .off
         transMicRadio.state = s.translationAudioSourceIsSystem ? .off : .on
         transSystemRadio.state = s.translationAudioSourceIsSystem ? .on : .off
-        deeplKeyField.stringValue = Self.maskedKey(s.deeplAPIKey)
+        // A previously saved key is treated as verified: show the mask.
+        deeplKeyField.stringValue = s.deeplAPIKey.isEmpty ? "" : Self.keyMask
         deeplKeyMasked = !s.deeplAPIKey.isEmpty
         subtitleCheck.state = s.subtitleOverlayEnabled ? .on : .off
         speakCheck.state = s.speakTranslations ? .on : .off
@@ -539,15 +540,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         onSettingsChanged?()
     }
 
-    // MARK: - DeepL key (masked display, plain while editing)
+    // MARK: - DeepL key (plain until verified, fully masked after)
 
-    /// The key shows masked once entered — plain text only while the field
-    /// has focus, so a screen-share can't leak it. NSSecureTextField is NOT
-    /// used because it blocks paste.
-    private static func maskedKey(_ key: String) -> String {
-        guard key.count > 10 else { return key.isEmpty ? "" : "••••••••" }
-        return "\(key.prefix(4))••••••••••••\(key.suffix(4))"
-    }
+    /// The key stays plain (and freely pastable/editable) until the Test
+    /// button VERIFIES it against the Voice endpoint — only then does the
+    /// field mask completely. Clicking into a masked field brings the real
+    /// key back for editing. NSSecureTextField is not used (it blocks paste).
+    private static let keyMask = String(repeating: "•", count: 20)
 
     func controlTextDidBeginEditing(_ notification: Notification) {
         guard (notification.object as? NSTextField) === deeplKeyField, deeplKeyMasked else { return }
@@ -557,17 +556,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     func controlTextDidEndEditing(_ notification: Notification) {
         guard (notification.object as? NSTextField) === deeplKeyField, !deeplKeyMasked else { return }
-        let key = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        Settings.shared.deeplAPIKey = key
-        deeplKeyField.stringValue = Self.maskedKey(key)
-        deeplKeyMasked = true
+        // Persist on blur, but keep the text visible — masking waits for a
+        // successful Test so the user can see what they typed until then.
+        Settings.shared.deeplAPIKey = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         onSettingsChanged?()
     }
 
     /// Tests the key against the VOICE endpoint (a session grant verifies the
     /// key, the paid plan, and Voice access in one round-trip), then speaks a
-    /// confirmation so the whole audio chain is verified by ear.
+    /// confirmation so the whole audio chain is verified by ear — and masks
+    /// the now-proven key.
     @objc private func deeplTestTapped() {
+        // Pick up whatever is in the field, saved or not.
+        if !deeplKeyMasked {
+            Settings.shared.deeplAPIKey = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let key = Settings.shared.deeplAPIKey
         guard !key.isEmpty else {
             statusLabel.textColor = .systemRed
@@ -583,6 +586,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 case .success:
                     self.statusLabel.textColor = .systemGreen
                     self.statusLabel.stringValue = "✓ Voice session granted"
+                    // Key proven — hide it completely now.
+                    self.deeplKeyField.stringValue = Self.keyMask
+                    self.deeplKeyMasked = true
+                    self.window?.makeFirstResponder(nil)
                     let tag = SpeechOutput.languageTag(deepl: Settings.shared.deeplTargetLang, llm: "")
                     let phrase = tag.hasPrefix("ko") ? "딥엘 보이스 연결이 확인되었습니다."
                         : tag.hasPrefix("ja") ? "DeepL Voiceの接続が確認できました。"
