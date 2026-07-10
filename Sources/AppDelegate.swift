@@ -432,11 +432,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockMode = mode
         if mode == .interpreter {
             translator.reset()
-            translator.targetLanguage = settings.interpreterTargetLanguage
-            translator.sourceLanguage = settings.interpreterSourceLanguage
-            // Pre-warm the LLM path (token refresh, instructions cache, TLS)
-            // so the first real utterance doesn't pay for any of it.
-            LLMRefiner.warmUpTranslation(to: settings.interpreterTargetLanguage)
+            if settings.deeplEnabled && settings.deeplConfigured {
+                translator.useDeepL = true
+                translator.deeplAPIKey = settings.deeplAPIKey
+                translator.deeplTargetLang = settings.deeplTargetLang
+                translator.deeplSourceLang = settings.deeplSourceLang
+            } else {
+                translator.useDeepL = false
+                translator.targetLanguage = settings.interpreterTargetLanguage
+                translator.sourceLanguage = settings.interpreterSourceLanguage
+                // Pre-warm the LLM path (token refresh, instructions cache, TLS)
+                // so the first real utterance doesn't pay for any of it.
+                LLMRefiner.warmUpTranslation(to: settings.interpreterTargetLanguage)
+            }
         }
         // Interpreter captions run taller (three lines of continuity: a
         // translation trails its speech, so the surrounding lines keep it
@@ -480,9 +488,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No floating HUD for locked sessions — the transcript window (opened
         // from the menu) and the menu-bar icon carry the feedback.
         transcriptWindow.updateTranscript("")
-        transcriptWindow.setStatus(mode == .interpreter
-            ? "● Interpreting → \(settings.interpreterTargetLanguage)…"
-            : "● Recording…  (⌃⇧Fn to stop)")
+        let interpLabel: String
+        if mode == .interpreter {
+            let via = translator.useDeepL ? "DeepL" : "LLM"
+            let target = translator.useDeepL ? settings.deeplTargetLang : settings.interpreterTargetLanguage
+            interpLabel = "● Interpreting → \(target) via \(via)…"
+        } else {
+            interpLabel = "● Recording…  (⌃⇧Fn to stop)"
+        }
+        transcriptWindow.setStatus(interpLabel)
         transcriptWindow.setRecording(true)
         if settings.subtitleOverlayEnabled {
             subtitles.show()

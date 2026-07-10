@@ -63,6 +63,13 @@ final class TranslationEngine {
     /// it. Set apart from the recognition language (which drives speech-to-text).
     var sourceLanguage = TranslationLanguage.autoSource
 
+    /// When set, translations go through DeepL instead of the LLM engine.
+    /// The engine switches per session at reset() time.
+    var useDeepL = false
+    var deeplAPIKey = ""
+    var deeplTargetLang = "KO"
+    var deeplSourceLang = ""
+
     /// One styled caption run: `committed` text renders white, else dimmed.
     struct CaptionRun {
         let text: String
@@ -276,17 +283,27 @@ final class TranslationEngine {
         let u = utterances[i]
         liveRequest = Request(id: u.id, source: u.source)
         let gen = generation
-        let ctx = context(before: i)
-        LLMRefiner.translate(
-            u.source,
-            to: targetLanguage,
-            from: sourceLanguage,
-            context: ctx?.source,
-            contextTranslation: ctx?.translation,
-            isFragment: true,
-            previousTranslation: u.translation.text
-        ) { [weak self] result in
-            DispatchQueue.main.async { self?.completeLive(result, gen: gen) }
+        if useDeepL {
+            DeepLTranslator.translate(u.source, targetLang: deeplTargetLang,
+                                       sourceLang: deeplSourceLang.isEmpty ? nil : deeplSourceLang,
+                                       apiKey: deeplAPIKey) { [weak self] result in
+                DispatchQueue.main.async {
+                    self?.completeLive(result.map { $0.text }, gen: gen)
+                }
+            }
+        } else {
+            let ctx = context(before: i)
+            LLMRefiner.translate(
+                u.source,
+                to: targetLanguage,
+                from: sourceLanguage,
+                context: ctx?.source,
+                contextTranslation: ctx?.translation,
+                isFragment: true,
+                previousTranslation: u.translation.text
+            ) { [weak self] result in
+                DispatchQueue.main.async { self?.completeLive(result, gen: gen) }
+            }
         }
     }
 
@@ -294,16 +311,36 @@ final class TranslationEngine {
         let u = utterances[i]
         qualityRequest = Request(id: u.id, source: u.source)
         let gen = generation
-        let ctx = context(before: i)
-        LLMRefiner.translate(
-            u.source,
-            to: targetLanguage,
-            from: sourceLanguage,
-            context: ctx?.source,
-            contextTranslation: ctx?.translation,
-            effort: "low"
-        ) { [weak self] result in
-            DispatchQueue.main.async { self?.completeQuality(result, gen: gen) }
+        if useDeepL {
+            // DeepL is deterministic — the quality pass would return the same
+            // result as the live pass, so just promote the draft directly.
+            if case .draft(let text, _) = u.translation {
+                utterances[i].translation = .final(text: text)
+                utterances[i].translatedSource = u.source
+                qualityRequest = nil
+                render()
+                schedule()
+                return
+            }
+            DeepLTranslator.translate(u.source, targetLang: deeplTargetLang,
+                                       sourceLang: deeplSourceLang.isEmpty ? nil : deeplSourceLang,
+                                       apiKey: deeplAPIKey) { [weak self] result in
+                DispatchQueue.main.async {
+                    self?.completeQuality(result.map { $0.text }, gen: gen)
+                }
+            }
+        } else {
+            let ctx = context(before: i)
+            LLMRefiner.translate(
+                u.source,
+                to: targetLanguage,
+                from: sourceLanguage,
+                context: ctx?.source,
+                contextTranslation: ctx?.translation,
+                effort: "low"
+            ) { [weak self] result in
+                DispatchQueue.main.async { self?.completeQuality(result, gen: gen) }
+            }
         }
     }
 

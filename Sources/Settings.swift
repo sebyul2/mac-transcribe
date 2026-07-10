@@ -76,6 +76,10 @@ final class Settings {
         static let meetingNotes = "meetingNotesEnabled"
         static let interpreterTarget = "interpreterTargetLanguage"
         static let meetingNotesProvider = "meetingNotesProvider"
+        static let deeplAPIKey = "deeplAPIKey"
+        static let deeplEnabled = "deeplEnabled"
+        static let deeplTargetLang = "deeplTargetLang"
+        static let deeplSourceLang = "deeplSourceLang"
         static let interpreterSource = "interpreterSourceLanguage"
         static let liveTranslation = "liveTranslationEnabled"
         static let audioSource = "lockedAudioSource"
@@ -195,6 +199,32 @@ final class Settings {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-5.4-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    // MARK: - DeepL
+
+    var deeplEnabled: Bool {
+        get { defaults.bool(forKey: Keys.deeplEnabled) }
+        set { defaults.set(newValue, forKey: Keys.deeplEnabled) }
+    }
+
+    var deeplAPIKey: String {
+        get { defaults.string(forKey: Keys.deeplAPIKey) ?? "" }
+        set { defaults.set(newValue, forKey: Keys.deeplAPIKey) }
+    }
+
+    var deeplTargetLang: String {
+        get { defaults.string(forKey: Keys.deeplTargetLang) ?? "KO" }
+        set { defaults.set(newValue, forKey: Keys.deeplTargetLang) }
+    }
+
+    var deeplSourceLang: String {
+        get { defaults.string(forKey: Keys.deeplSourceLang) ?? "" }
+        set { defaults.set(newValue, forKey: Keys.deeplSourceLang) }
+    }
+
+    var deeplConfigured: Bool {
+        !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// Where locked (long-form) sessions capture audio from: the microphone,

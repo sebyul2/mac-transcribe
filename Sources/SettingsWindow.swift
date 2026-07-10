@@ -43,6 +43,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let meetingNotesCheck = NSButton(checkboxWithTitle: "Generate meeting notes after a recording", target: nil, action: nil)
     private let notesProviderPopup = NSPopUpButton()
 
+    // DeepL
+    private let deeplEnabledCheck = NSButton(checkboxWithTitle: "Use DeepL for Live Translation (instead of Engine)", target: nil, action: nil)
+    private let deeplKeyField = NSSecureTextField()
+    private let deeplSourcePopup = NSPopUpButton()
+    private let deeplTargetPopup = NSPopUpButton()
+    private let deeplStatusLabel = NSTextField(labelWithString: "")
+
     // Engine (LLM)
     private let providerPopup = NSPopUpButton()
     private let modelPopup = NSPopUpButton()
@@ -81,6 +88,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         tabView.addTabViewItem(makeTab("General", build: buildGeneralTab))
         tabView.addTabViewItem(makeTab("Translation", build: buildTranslationTab))
         tabView.addTabViewItem(makeTab("Meeting", build: buildMeetingTab))
+        tabView.addTabViewItem(makeTab("DeepL", build: buildDeepLTab))
         tabView.addTabViewItem(makeTab("Engine", build: buildEngineTab))
         content.addSubview(tabView)
     }
@@ -246,6 +254,96 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         place(notesNote, x: 20, top: 186, w: 440, h: 40, in: view)
     }
 
+    // MARK: - DeepL tab
+
+    private func buildDeepLTab(_ view: NSView) {
+        deeplEnabledCheck.target = self
+        deeplEnabledCheck.action = #selector(deeplEnabledChanged)
+        place(deeplEnabledCheck, x: 20, top: 20, w: 440, h: 20, in: view)
+        let enableNote = NSTextField(wrappingLabelWithString:
+            "When enabled, Live Translation uses the DeepL API instead of the LLM Engine. "
+            + "DeepL is faster (~200ms) and generally more natural for short utterances.")
+        enableNote.font = .systemFont(ofSize: 11); enableNote.textColor = .secondaryLabelColor
+        place(enableNote, x: 40, top: 42, w: 420, h: 32, in: view)
+
+        _ = label("API Key:", top: 90, in: view)
+        place(deeplKeyField, x: fieldX, top: 88, w: fieldW, in: view)
+        deeplKeyField.isEditable = true; deeplKeyField.isBezeled = true
+        deeplKeyField.bezelStyle = .roundedBezel
+        deeplKeyField.placeholderString = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+        _ = label("Source:", top: 128, in: view)
+        for lang in DeepLTranslator.sourceLanguages {
+            deeplSourcePopup.addItem(withTitle: lang.display)
+            deeplSourcePopup.lastItem?.representedObject = lang.code
+        }
+        place(deeplSourcePopup, x: fieldX, top: 126, w: fieldW, in: view)
+
+        _ = label("Target:", top: 164, in: view)
+        for lang in DeepLTranslator.targetLanguages {
+            deeplTargetPopup.addItem(withTitle: lang.display)
+            deeplTargetPopup.lastItem?.representedObject = lang.code
+        }
+        place(deeplTargetPopup, x: fieldX, top: 162, w: fieldW, in: view)
+
+        deeplStatusLabel.alignment = .left
+        deeplStatusLabel.maximumNumberOfLines = 2
+        deeplStatusLabel.lineBreakMode = .byWordWrapping
+        deeplStatusLabel.textColor = .secondaryLabelColor
+        place(deeplStatusLabel, x: 20, top: 210, w: 440, h: 40, in: view)
+
+        let testButton = NSButton(title: "Test", target: self, action: #selector(deeplTestTapped))
+        testButton.bezelStyle = .rounded
+        place(testButton, x: 260, top: 266, w: 90, h: 32, in: view)
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(deeplSaveTapped))
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+        place(saveButton, x: 360, top: 266, w: 100, h: 32, in: view)
+    }
+
+    @objc private func deeplEnabledChanged() {
+        Settings.shared.deeplEnabled = deeplEnabledCheck.state == .on
+        onSettingsChanged?()
+    }
+
+    @objc private func deeplSaveTapped() {
+        let s = Settings.shared
+        s.deeplAPIKey = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        s.deeplSourceLang = represented(deeplSourcePopup)
+        s.deeplTargetLang = represented(deeplTargetPopup)
+        s.deeplEnabled = deeplEnabledCheck.state == .on
+        deeplStatusLabel.textColor = .systemGreen
+        deeplStatusLabel.stringValue = "Saved."
+        onSettingsChanged?()
+    }
+
+    @objc private func deeplTestTapped() {
+        let key = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = represented(deeplTargetPopup)
+        let source = represented(deeplSourcePopup)
+        guard !key.isEmpty else {
+            deeplStatusLabel.textColor = .systemRed
+            deeplStatusLabel.stringValue = "Enter an API key first."
+            return
+        }
+        deeplStatusLabel.textColor = .secondaryLabelColor
+        deeplStatusLabel.stringValue = "Testing…"
+        DeepLTranslator.translate("Hello, this is a test.", targetLang: target,
+                                   sourceLang: source.isEmpty ? nil : source, apiKey: key) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let t):
+                    self.deeplStatusLabel.textColor = .systemGreen
+                    self.deeplStatusLabel.stringValue = "✓ \(t.text)"
+                case .failure(let error):
+                    self.deeplStatusLabel.textColor = .systemRed
+                    self.deeplStatusLabel.stringValue = "Failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     // MARK: - Engine tab (LLM)
 
     private func buildEngineTab(_ view: NSView) {
@@ -336,6 +434,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         selectByRepresented(sourceLangPopup, s.interpreterSourceLanguage)
         selectByRepresented(targetLangPopup, s.interpreterTargetLanguage)
         subtitleCheck.state = s.subtitleOverlayEnabled ? .on : .off
+
+        deeplEnabledCheck.state = s.deeplEnabled ? .on : .off
+        deeplKeyField.stringValue = s.deeplAPIKey
+        selectByRepresented(deeplSourcePopup, s.deeplSourceLang)
+        selectByRepresented(deeplTargetPopup, s.deeplTargetLang)
 
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off
