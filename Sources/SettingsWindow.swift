@@ -678,9 +678,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             glossaryStatusLabel.stringValue = "None (optional)"
             glossaryStatusLabel.textColor = .secondaryLabelColor
         }
-        let pairCount = s.translationGlossaryPairs.count
+        let pairCount = s.translationGlossaryCount
         if pairCount > 0 {
-            transGlossaryStatusLabel.stringValue = "✓ \(pairCount) pairs — \(s.translationGlossaryURL.lastPathComponent)"
+            transGlossaryStatusLabel.stringValue = "✓ \(pairCount) terms — \(s.translationGlossaryURL.lastPathComponent)"
             transGlossaryStatusLabel.textColor = .systemGreen
         } else {
             transGlossaryStatusLabel.stringValue = "None (optional)"
@@ -692,8 +692,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.plainText]
-        panel.message = "번역 용어집 선택 — 한 줄에 하나씩 \"원어 용어 -> 번역어 용어\""
+        panel.allowedContentTypes = [.plainText, .json]
+        panel.message = "번역 용어집 선택 — JSON 용어 시트({term, ko, jp, en}) 또는 \"원어 -> 번역어\" 텍스트"
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             Settings.shared.translationGlossaryURL = url

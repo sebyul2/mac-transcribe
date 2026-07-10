@@ -792,9 +792,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             session.start(apiKey: apiKey, sourceLang: sourceLang,
                           targetLang: targetLang, glossaryID: glossaryID)
         }
-        // Glossary terms ride along when the user has "A -> B" pairs and a
-        // fixed source language (DeepL glossaries are per language pair).
-        let pairs = settings.translationGlossaryPairs
+        // Glossary terms ride along when the language pair maps onto the
+        // terminology sheet's columns and the source language is fixed
+        // (DeepL glossaries are per language pair).
+        let pairs = Settings.glossaryColumn(deepl: targetLang).map {
+            settings.translationGlossaryPairs(
+                sourceColumn: Settings.glossaryColumn(deepl: sourceLang),
+                targetColumn: $0)
+        } ?? []
         if pairs.isEmpty || sourceLang.isEmpty {
             launch(nil)
         } else {

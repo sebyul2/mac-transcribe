@@ -442,8 +442,83 @@ final class Settings {
         return String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8000))
     }
 
-    /// "원어 -> 번역어" pairs from the translation glossary.
-    var translationGlossaryPairs: [(String, String)] {
+    /// The glossary file accepts TWO formats:
+    ///  - a JSON array of {"term", "ko", "jp", "en", "memo"} objects — the
+    ///    team's shared terminology sheet, attached as-is; the language pair
+    ///    of the session picks which columns become source/target
+    ///  - plain "원어 -> 번역어" lines (language-pair agnostic)
+
+    /// JSON entries when the file is the terminology-sheet format, else nil.
+    private var translationGlossaryJSON: [[String: String]]? {
+        guard let data = try? Data(contentsOf: translationGlossaryURL),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return nil
+        }
+        return array.map { entry in entry.compactMapValues { $0 as? String } }
+    }
+
+    /// JSON column key for a DeepL language code ("JA" -> "jp"), or nil for
+    /// languages the sheet doesn't carry.
+    static func glossaryColumn(deepl code: String) -> String? {
+        switch code.prefix(2).uppercased() {
+        case "KO": return "ko"
+        case "JA": return "jp"
+        case "EN": return "en"
+        default: return nil
+        }
+    }
+
+    /// JSON column key for an LLM prompt language name ("Japanese" -> "jp").
+    static func glossaryColumn(promptName: String) -> String? {
+        switch promptName {
+        case "Korean": return "ko"
+        case "Japanese": return "jp"
+        case "English": return "en"
+        default: return nil
+        }
+    }
+
+    /// Translation pairs for a language pair. For the JSON sheet, the source
+    /// column's spellings (split on "、,/" — the sheet lists variants) map to
+    /// the target column's first spelling; the "term" column doubles as a
+    /// source spelling for Korean (it is the sheet's Korean-keyed handle).
+    /// nil sourceColumn (auto-detect) uses "term" + every language column as
+    /// possible source spellings. Plain "A -> B" files return their lines.
+    func translationGlossaryPairs(sourceColumn: String?, targetColumn: String) -> [(String, String)] {
+        guard let entries = translationGlossaryJSON else { return arrowLinePairs }
+        var seenSources = Set<String>()
+        var pairs: [(String, String)] = []
+        for entry in entries {
+            guard let rawTarget = entry[targetColumn]?.trimmingCharacters(in: .whitespaces),
+                  !rawTarget.isEmpty else { continue }
+            let target = Self.splitSpellings(rawTarget).first ?? rawTarget
+
+            var sourceSpellings: [String] = []
+            if let column = sourceColumn {
+                if let s = entry[column] { sourceSpellings += Self.splitSpellings(s) }
+                if column == "ko", let term = entry["term"] { sourceSpellings += Self.splitSpellings(term) }
+            } else {
+                for key in ["term", "ko", "jp", "en"] {
+                    if let s = entry[key] { sourceSpellings += Self.splitSpellings(s) }
+                }
+            }
+            for source in sourceSpellings
+            where !source.isEmpty && source != target && seenSources.insert(source).inserted {
+                pairs.append((source, target))
+            }
+        }
+        return Array(pairs.prefix(500))
+    }
+
+    /// A sheet cell can list variants: "台本、脚本" / "RoFO, Right of First Offer".
+    private static func splitSpellings(_ value: String) -> [String] {
+        value.split(whereSeparator: { "、,/".contains($0) })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// "원어 -> 번역어" pairs from a plain-text glossary.
+    private var arrowLinePairs: [(String, String)] {
         var pairs: [(String, String)] = []
         for rawLine in translationGlossaryText.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -454,6 +529,12 @@ final class Settings {
             if !source.isEmpty, !target.isEmpty { pairs.append((source, target)) }
         }
         return Array(pairs.prefix(500))
+    }
+
+    /// Entry count for the settings UI, format-agnostic.
+    var translationGlossaryCount: Int {
+        if let entries = translationGlossaryJSON { return entries.count }
+        return arrowLinePairs.count
     }
 
     /// LLM refinement is usable only when enabled and minimally configured.

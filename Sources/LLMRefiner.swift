@@ -240,16 +240,19 @@ enum LLMRefiner {
         // The TRANSLATION glossary (separate from the meeting/STT one) rides
         // only on the quality pass (effort > none): the live loop is
         // latency-critical and its output gets replaced anyway.
-        if effort != "none" {
-            let glossary = settings.translationGlossaryText
-            if !glossary.isEmpty {
+        if effort != "none", let targetColumn = Settings.glossaryColumn(promptName: language) {
+            let pairs = settings.translationGlossaryPairs(
+                sourceColumn: Settings.glossaryColumn(promptName: settings.interpreterSourceLanguage),
+                targetColumn: targetColumn)
+            if !pairs.isEmpty {
+                let lines = pairs.map { "\($0.0) -> \($0.1)" }.joined(separator: "\n")
                 prompt += """
 
 
-                Glossary — lines of the form "A -> B" mean: when the source contains term A, \
-                translate it as B. Apply only when the term actually appears.
+                Glossary — when the source contains the term on the left, translate it as the \
+                term on the right. Apply only when the term actually appears.
 
-                \(glossary.prefix(2000))
+                \(lines.prefix(2000))
                 """
             }
         }
