@@ -57,7 +57,7 @@ import Foundation
 /// and resumes after a cooldown; captions fall back to source meanwhile.
 ///
 /// Single-threaded (main). LLM completions bounce back to main. No locks.
-final class TranslationEngine {
+final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
     /// English name of the target language, used verbatim in the prompt.
     var targetLanguage = "English"
     /// English name of the source language, or "Auto" to let the model detect
@@ -176,6 +176,15 @@ final class TranslationEngine {
 
     // MARK: - Lifecycle
 
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        speechQueue = max(0, speechQueue - 1)
+    }
+
     /// Session start: forget everything and invalidate any in-flight responses.
     func reset() {
         generation &+= 1
@@ -221,7 +230,14 @@ final class TranslationEngine {
                     }
                     utterances[i].qualityAttempts = 0
                 }
-                utterances[i].sealed = true
+                if !utterances[i].sealed {
+                    utterances[i].sealed = true
+                    // The moment a line seals with a draft, read it aloud
+                    // immediately — don't wait for the quality pass.
+                    if let text = utterances[i].translation.text { speak(text) }
+                } else {
+                    utterances[i].sealed = true
+                }
             } else {
                 utterances.append(Utterance(id: mintID(), source: src, sealed: true, translatedSource: nil))
             }
@@ -448,14 +464,24 @@ final class TranslationEngine {
 
     // MARK: - TTS
 
-    /// Reads a translated utterance aloud. Skips if TTS is off, or if the
-    /// synthesizer is already speaking (so utterances don't queue up and play
-    /// minutes behind). Uses the target language to pick the voice.
+    /// Reads a translated utterance aloud. Queues behind the current speech
+    /// so consecutive sentences flow naturally like a simultaneous interpreter.
+    /// If the queue grows too deep (speech falling behind live conversation),
+    /// flushes the backlog and jumps to the latest.
+    private var lastSpoken = ""
+    private var speechQueue = 0
     private func speak(_ text: String) {
-        guard speakTranslations, !text.isEmpty else { return }
-        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .word) }
+        guard speakTranslations, !text.isEmpty, text != lastSpoken else { return }
+        lastSpoken = text
+        if speechQueue >= 2 {
+            synthesizer.stopSpeaking(at: .word)
+            speechQueue = 0
+        }
+        speechQueue += 1
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.25
+        utterance.preUtteranceDelay = 0.05
+        utterance.postUtteranceDelay = 0.1
         // Pick a voice for the target language — DeepL codes and LLM prompt
         // names both need to map to a BCP 47 language tag.
         let langTag = Self.ttsLanguageTag(deepl: deeplTargetLang, llm: targetLanguage)
