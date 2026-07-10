@@ -35,6 +35,15 @@ final class LongFormTranscriber {
     /// interpreting calls and videos.
     var audioSource: AudioSource = .microphone
 
+    /// Streaming-translation mode (DeepL Voice): captured buffers go to this
+    /// sink instead of the on-device recognizer — DeepL does its own ASR,
+    /// segmentation, and translation server-side. Audio backup, level HUD,
+    /// and session lifecycle stay exactly the same; the analyzer pipeline,
+    /// VAD sealing, and the mute watchdog simply never start. Set both
+    /// before start().
+    var externalAudioSink: ((AVAudioPCMBuffer) -> Void)?
+    var bypassAnalyzer = false
+
     /// Transient status for the UI (e.g. "downloading model…"), on main.
     var onStatus: ((String) -> Void)?
 
@@ -101,6 +110,8 @@ final class LongFormTranscriber {
         // the word — and the ending got sealed off mid-syllable.
         let threshold = max(0.03, levelEnvelope * 0.08)
         let now = Date()
+        // Streaming mode has no recognizer: no finalize, no watchdog.
+        guard !bypassAnalyzer else { return }
         maybeRestartMutePipeline(now: now)
         if level >= threshold {
             voiceActive = true
@@ -346,6 +357,12 @@ final class LongFormTranscriber {
         }
         isRunning = false
         stopEngine()
+        if bypassAnalyzer {
+            // No recognizer to drain in streaming mode — finish immediately;
+            // the streaming session owns the transcript.
+            deliverFinish(gen: myGen)
+            return
+        }
         stateLock.lock()
         let builder = inputBuilder
         inputBuilder = nil
@@ -372,9 +389,11 @@ final class LongFormTranscriber {
         // below are in flight; continuing to set up a dead session corrupts
         // the newer one and can trap inside the Speech framework.
         do {
-            guard try await setupAnalyzerPipeline(language: language, gen: myGen) else {
-                deliverFinish(gen: myGen)
-                return
+            if !bypassAnalyzer {
+                guard try await setupAnalyzerPipeline(language: language, gen: myGen) else {
+                    deliverFinish(gen: myGen)
+                    return
+                }
             }
             // Use the system default input as-is. Forcing the built-in mic
             // (like push-to-talk does) records silence in clamshell mode with
@@ -696,6 +715,7 @@ final class LongFormTranscriber {
             DispatchQueue.main.async { [weak self] in self?.onLevel?(level) }
         }
 
+        externalAudioSink?(buffer)
         guard let builder else { return }
         if let converter, let analyzerFormat {
             let ratio = analyzerFormat.sampleRate / buffer.format.sampleRate
@@ -814,6 +834,7 @@ final class LongFormTranscriber {
             DispatchQueue.main.async { [weak self] in self?.onLevel?(level) }
         }
 
+        externalAudioSink?(buffer)
         guard let builder else { return }
         if let converter, let analyzerFormat {
             let ratio = analyzerFormat.sampleRate / buffer.format.sampleRate

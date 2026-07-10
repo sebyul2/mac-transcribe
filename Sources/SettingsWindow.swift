@@ -45,6 +45,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // DeepL
     private let deeplEnabledCheck = NSButton(checkboxWithTitle: "Use DeepL for Live Translation (instead of Engine)", target: nil, action: nil)
+    private let deeplVoiceCheck = NSButton(checkboxWithTitle: "Voice streaming — 오디오를 DeepL로 직접 스트리밍 (전사·분절·번역 일체)", target: nil, action: nil)
     private let deeplKeyField = NSTextField()
     private let deeplSourcePopup = NSPopUpButton()
     private let deeplTargetPopup = NSPopUpButton()
@@ -261,12 +262,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildDeepLTab(_ view: NSView) {
         deeplEnabledCheck.target = self
         deeplEnabledCheck.action = #selector(deeplEnabledChanged)
-        place(deeplEnabledCheck, x: 20, top: 20, w: 440, h: 20, in: view)
-        let enableNote = NSTextField(wrappingLabelWithString:
-            "When enabled, Live Translation uses the DeepL API instead of the LLM Engine. "
-            + "DeepL is faster (~200ms) and generally more natural for short utterances.")
-        enableNote.font = .systemFont(ofSize: 11); enableNote.textColor = .secondaryLabelColor
-        place(enableNote, x: 40, top: 42, w: 420, h: 32, in: view)
+        place(deeplEnabledCheck, x: 20, top: 18, w: 440, h: 20, in: view)
+
+        deeplVoiceCheck.target = self
+        deeplVoiceCheck.action = #selector(deeplVoiceChanged)
+        place(deeplVoiceCheck, x: 40, top: 40, w: 420, h: 20, in: view)
+        let voiceNote = NSTextField(labelWithString:
+            "Voice가 켜지면 로컬 전사를 건너뜁니다 — 어미 잘림·파편 번역이 사라집니다.")
+        voiceNote.font = .systemFont(ofSize: 11); voiceNote.textColor = .secondaryLabelColor
+        place(voiceNote, x: 60, top: 62, w: 400, h: 16, in: view)
 
         _ = label("API Key:", top: 90, in: view)
         place(deeplKeyField, x: fieldX, top: 88, w: fieldW, in: view)
@@ -334,6 +338,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func deeplDuckChanged() {
         Settings.shared.duckWhileSpeaking = deeplDuckCheck.state == .on
+        onSettingsChanged?()
+    }
+
+    @objc private func deeplVoiceChanged() {
+        Settings.shared.deeplVoiceEnabled = deeplVoiceCheck.state == .on
         onSettingsChanged?()
     }
 
@@ -490,6 +499,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         selectByRepresented(deeplTargetPopup, s.deeplTargetLang)
         deeplSpeakCheck.state = s.speakTranslations ? .on : .off
         deeplDuckCheck.state = s.duckWhileSpeaking ? .on : .off
+        deeplVoiceCheck.state = s.deeplVoiceEnabled ? .on : .off
 
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off

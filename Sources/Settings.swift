@@ -239,6 +239,15 @@ final class Settings {
         !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// DeepL Voice streaming: audio goes straight to DeepL (its own ASR +
+    /// segmentation + translation) instead of local transcription feeding
+    /// text requests. Fixes utterance-ending loss and fragment translation
+    /// at the root.
+    var deeplVoiceEnabled: Bool {
+        get { defaults.bool(forKey: "deeplVoiceEnabled") }
+        set { defaults.set(newValue, forKey: "deeplVoiceEnabled") }
+    }
+
     /// Where locked (long-form) sessions capture audio from: the microphone,
     /// or the computer's own output (system audio via ScreenCaptureKit — for
     /// interpreting calls/videos; requires Screen Recording permission).

@@ -13,6 +13,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Voices translated utterances (continuous TTS with optional ducking).
     private let speechOutput = SpeechOutput()
 
+    // MARK: DeepL Voice streaming state
+    //
+    /// Active streaming session (nil outside voice-mode recordings).
+    private var voiceSession: DeepLVoiceSession?
+    /// Transcript carried over across session reconnects (1 h server cap,
+    /// network drops): the new session's text is appended onto these bases.
+    private var voiceSourceBase = ""
+    private var voiceTargetBase = ""
+    /// Latest full transcripts (base + current session), for save/display.
+    private var voiceSourceFull = ""
+    private var voiceTargetFull = ""
+    /// How much of the target transcript has been handed to TTS.
+    private var voiceSpokenLength = 0
+    private var voiceRestarts = 0
+
     /// What a locked session is for: a meeting capture (transcript + optional
     /// refinement/minutes) or one-way live interpretation (translated captions;
     /// only the raw conversation is saved — never minutes).
@@ -439,6 +454,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let deeplReady = settings.deeplEnabled && settings.deeplConfigured
         let llmReady = settings.liveTranslationEnabled && settings.llmConfigured
         let mode: LockMode = (deeplReady || llmReady) ? .interpreter : .meeting
+        // Clear any streaming-mode residue from the previous session; the
+        // voice branch below re-arms it when applicable.
+        longForm.bypassAnalyzer = false
+        longForm.externalAudioSink = nil
+        voiceSession = nil
         lockMode = mode
         if mode == .interpreter {
             translator.reset()
@@ -448,7 +468,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speechOutput.languageTag = SpeechOutput.languageTag(
                 deepl: settings.deeplEnabled ? settings.deeplTargetLang : "",
                 llm: settings.interpreterTargetLanguage)
-            if settings.deeplEnabled && settings.deeplConfigured {
+            if settings.deeplEnabled && settings.deeplConfigured && settings.deeplVoiceEnabled {
+                // DeepL Voice streaming: audio goes straight to DeepL, which
+                // does its own ASR + segmentation + translation. The local
+                // recognizer never starts, so none of its fragment/ending
+                // problems apply.
+                voiceSourceBase = ""; voiceTargetBase = ""
+                voiceSourceFull = ""; voiceTargetFull = ""
+                voiceSpokenLength = 0; voiceRestarts = 0
+                longForm.bypassAnalyzer = true
+                startVoiceSession()
+            } else if settings.deeplEnabled && settings.deeplConfigured {
                 translator.useDeepL = true
                 translator.deeplAPIKey = settings.deeplAPIKey
                 translator.deeplTargetLang = settings.deeplTargetLang
@@ -506,8 +536,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcriptWindow.updateTranscript("")
         let interpLabel: String
         if mode == .interpreter {
-            let via = translator.useDeepL ? "DeepL" : "LLM"
-            let target = translator.useDeepL ? settings.deeplTargetLang : settings.interpreterTargetLanguage
+            let via = longForm.bypassAnalyzer ? "DeepL Voice"
+                : translator.useDeepL ? "DeepL" : "LLM"
+            let target = (longForm.bypassAnalyzer || translator.useDeepL)
+                ? settings.deeplTargetLang : settings.interpreterTargetLanguage
             interpLabel = "● Interpreting → \(target) via \(via)…"
         } else {
             interpLabel = "● Recording…  (⌃⇧Fn to stop)"
@@ -552,8 +584,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         subtitles.hide()
         translator.teardown()
         speechOutput.endSession()
+        // Streaming mode: the voice session owns the transcript (the local
+        // recognizer never ran); stop it and save what it heard.
+        var finalText = text
+        if longForm.bypassAnalyzer {
+            voiceSession?.stop()
+            voiceSession = nil
+            longForm.externalAudioSink = nil
+            longForm.bypassAnalyzer = false
+            finalText = voiceSourceFull
+        }
         postRecordingTasks = 0
-        finishLockedSession(with: text)
+        finishLockedSession(with: finalText)
         // If no post-recording tasks were started (no refinement, no notes),
         // release the sleep-prevention activity now; otherwise each task
         // releases it when it finishes.
@@ -656,6 +698,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 TextInjector.inject(text)
             }
         }
+    }
+
+    // MARK: - DeepL Voice streaming
+
+    /// Opens a streaming session and points the capture tee at it. Called at
+    /// session start and again on reconnect (server 1 h cap, network drops);
+    /// the finished transcript of the dying session is folded into the base
+    /// so the display and the save never lose text across reconnects.
+    private func startVoiceSession() {
+        let session = DeepLVoiceSession()
+        voiceSession = session
+        session.onSourceTranscript = { [weak self] concluded, tentative in
+            guard let self, self.voiceSession === session else { return }
+            self.voiceSourceFull = self.voiceSourceBase + concluded + tentative
+            self.autosaveLockedTranscript(self.voiceSourceFull)
+        }
+        session.onTargetTranscript = { [weak self] concluded, tentative in
+            guard let self, self.voiceSession === session else { return }
+            self.voiceTargetFull = self.voiceTargetBase + concluded
+            self.transcriptWindow.updateTranscript(self.voiceTargetFull + tentative)
+            self.subtitles.update(pieces: Self.voiceCaptionPieces(
+                concluded: self.voiceTargetFull, tentative: tentative))
+            // Speak newly concluded text; concluded is append-only so the
+            // delta is safe, and the length survives reconnects via the base.
+            if self.voiceTargetFull.count > self.voiceSpokenLength {
+                self.speechOutput.enqueue(String(self.voiceTargetFull.dropFirst(self.voiceSpokenLength)))
+                self.voiceSpokenLength = self.voiceTargetFull.count
+            }
+        }
+        session.onError = { [weak self] message in
+            self?.handleVoiceError(message, from: session)
+        }
+        session.start(
+            apiKey: settings.deeplAPIKey,
+            sourceLang: settings.deeplSourceLang,
+            targetLang: settings.deeplTargetLang)
+        longForm.externalAudioSink = { [weak session] buffer in
+            session?.feed(buffer)
+        }
+    }
+
+    private func handleVoiceError(_ message: String, from session: DeepLVoiceSession) {
+        guard voiceSession === session, isLockedRecording, longForm.bypassAnalyzer else { return }
+        // Fold the dead session's text into the base and reconnect.
+        voiceSourceBase = voiceSourceFull.isEmpty ? "" : voiceSourceFull + "\n"
+        voiceTargetBase = voiceTargetFull.isEmpty ? "" : voiceTargetFull + "\n"
+        guard voiceRestarts < 5 else {
+            transcriptWindow.setStatus("Voice session lost (\(message)) — recording continues, translation stopped")
+            subtitles.flashStatus("⚠️ 통역 연결 끊김 — 녹음은 계속됩니다")
+            return
+        }
+        voiceRestarts += 1
+        NSLog("MacTranscribe[App]: voice session error (\(message)); reconnect #\(voiceRestarts)")
+        transcriptWindow.setStatus("Voice reconnecting (\(voiceRestarts))…")
+        startVoiceSession()
+    }
+
+    /// Caption pieces for streaming mode: the last couple of concluded
+    /// sentences white, the tentative tail grey — same broadcast style as
+    /// the engine-based path.
+    private static func voiceCaptionPieces(concluded: String, tentative: String) -> [(text: String, isFinal: Bool)] {
+        var sentences: [String] = []
+        var current = ""
+        for ch in concluded {
+            current.append(ch)
+            if "。.?？!！\n".contains(ch) {
+                let t = current.trimmingCharacters(in: .whitespaces)
+                if !t.isEmpty { sentences.append(t) }
+                current = ""
+            }
+        }
+        let leftover = current.trimmingCharacters(in: .whitespaces)
+        var pieces: [(text: String, isFinal: Bool)] = []
+        let tail = sentences.suffix(2).joined(separator: "\n")
+        if !tail.isEmpty {
+            pieces.append((tail + (leftover.isEmpty && tentative.isEmpty ? "" : "\n"), true))
+        }
+        if !leftover.isEmpty { pieces.append((leftover, true)) }
+        if !tentative.isEmpty { pieces.append((tentative, false)) }
+        return pieces
     }
 
     // MARK: - Locked session persistence
