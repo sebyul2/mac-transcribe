@@ -262,7 +262,72 @@ final class LongFormTranscriber {
     private func markAudioStarted() {
         stateLock.lock()
         audioStartedAt = Date()
+        lastBufferAt = Date()
         stateLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.startCaptureWatchdog() }
+    }
+
+    // MARK: - Capture-stream watchdog
+    //
+    // SCStream is known to die SILENTLY: buffers just stop arriving while
+    // the stream object stays "running" (observed repeatedly: sys-audio
+    // buffer counters freeze mid-session, e.g. at #500, with no error).
+    // Silence is not the explanation — SCStream delivers level-0 buffers
+    // when nothing plays — so a several-second gap in buffers means the
+    // stream is dead. Rebuild the capture path; the transcriber/voice
+    // session and the audio backup survive.
+
+    /// When the last capture buffer arrived. Guarded by stateLock.
+    private var lastBufferAt = Date.distantFuture
+    private var captureWatchdogTimer: Timer?
+    private var captureRestartInFlight = false
+    private let captureStallTimeout: TimeInterval = 5
+
+    private func startCaptureWatchdog() {
+        captureWatchdogTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.checkCaptureAlive()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        captureWatchdogTimer = timer
+    }
+
+    private func checkCaptureAlive() {
+        stateLock.lock()
+        let last = lastBufferAt
+        let running = isRunning
+        stateLock.unlock()
+        guard running, !captureRestartInFlight, last != .distantFuture,
+              Date().timeIntervalSince(last) > captureStallTimeout else { return }
+        guard audioSource == .systemAudio else {
+            // A dead mic engine has not been observed; log so it becomes
+            // diagnosable if it ever is.
+            SpeechService.diag("capture watchdog: mic buffers stalled (no auto-restart)")
+            stateLock.lock(); lastBufferAt = Date(); stateLock.unlock()
+            return
+        }
+        captureRestartInFlight = true
+        SpeechService.diag("capture watchdog: no buffers for \(Int(captureStallTimeout))s — restarting system capture")
+        DispatchQueue.main.async { [weak self] in self?.onStatus?("Audio capture stalled — restarting…") }
+        stateLock.lock()
+        let stream = scStream
+        scStream = nil
+        scOutput = nil
+        stateLock.unlock()
+        Task { [weak self] in
+            if let stream { try? await stream.stopCapture() }
+            guard let self, self.isRunning else { return }
+            do {
+                try await self.startSystemCapture(reopenBackup: false)
+                SpeechService.diag("capture watchdog: system capture restarted")
+            } catch {
+                SpeechService.diag("capture watchdog: restart FAILED: \(error)")
+            }
+            self.stateLock.lock()
+            self.lastBufferAt = Date() // re-arm; don't refire instantly
+            self.captureRestartInFlight = false
+            self.stateLock.unlock()
+        }
     }
 
     private func noteFirstResult() {
@@ -700,6 +765,7 @@ final class LongFormTranscriber {
         // Snapshot the shared state under the lock; these properties are
         // mutated from the session pipeline on other threads.
         stateLock.lock()
+        lastBufferAt = Date()
         let backup = backupFile
         let builder = inputBuilder
         let converter = self.converter
@@ -756,7 +822,7 @@ final class LongFormTranscriber {
     /// Captures the computer's own audio output via ScreenCaptureKit and
     /// feeds it through the same pipeline as the microphone tap. Requires the
     /// Screen Recording permission (prompted on first use).
-    private func startSystemCapture() async throws {
+    private func startSystemCapture(reopenBackup: Bool = true) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
             throw NSError(domain: "MacTranscribe", code: 3,
@@ -774,8 +840,10 @@ final class LongFormTranscriber {
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 5)
 
-        // Open the backup file against the capture format.
-        if let url = audioBackupURL,
+        // Open the backup file against the capture format. Skipped on a
+        // watchdog restart: reopening would TRUNCATE the session's backup —
+        // the existing file handle keeps appending across stream rebuilds.
+        if reopenBackup, let url = audioBackupURL,
            let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1) {
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -817,6 +885,7 @@ final class LongFormTranscriber {
     /// convert, and yield to the analyzer. Mirrors the mic tap.
     private func processCaptured(_ buffer: AVAudioPCMBuffer) {
         stateLock.lock()
+        lastBufferAt = Date()
         let backup = backupFile
         let builder = inputBuilder
         let analyzerFormat = self.analyzerFormat
@@ -914,7 +983,11 @@ final class LongFormTranscriber {
         stateLock.unlock()
         let transcript = combinedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         SpeechService.diag("longform end chars=\(transcript.count) peak=\(peak)")
-        DispatchQueue.main.async { [weak self] in self?.onFinished?(transcript) }
+        DispatchQueue.main.async { [weak self] in
+            self?.captureWatchdogTimer?.invalidate()
+            self?.captureWatchdogTimer = nil
+            self?.onFinished?(transcript)
+        }
     }
 
     /// Deep-copies a PCM buffer so it can outlive the tap callback (the engine

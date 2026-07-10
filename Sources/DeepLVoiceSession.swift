@@ -45,9 +45,10 @@ final class DeepLVoiceSession: NSObject {
     private var converterInputFormat: AVAudioFormat?
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
-    /// Pending PCM bytes; sent when ~200 ms (6400 bytes) accumulate.
+    /// Pending PCM bytes; sent when ~100 ms (3200 bytes) accumulate — the
+    /// low end of the protocol's 50–250 ms guidance, shaving latency.
     private var pendingAudio = Data()
-    private let chunkBytes = 6400
+    private let chunkBytes = 3200
     /// 16 kHz × 2 bytes: one second of pending audio.
     private let bytesPerSecond = 32_000
     /// Live interpretation must stay LIVE: when sending falls behind (socket
