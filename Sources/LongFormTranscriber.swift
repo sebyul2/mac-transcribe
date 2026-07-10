@@ -84,6 +84,7 @@ final class LongFormTranscriber {
         levelEnvelope = max(level, levelEnvelope * 0.995)
         let threshold = max(0.04, levelEnvelope * 0.2)
         let now = Date()
+        maybeRestartMutePipeline(now: now)
         if level >= threshold {
             voiceActive = true
             lastVoiceAt = now
@@ -193,6 +194,97 @@ final class LongFormTranscriber {
     /// framework (EXC_BREAKPOINT).
     private var gen = 0
 
+    // MARK: - Mute-pipeline watchdog
+    //
+    // A session can come up MUTE: audio flows (levels register) but the
+    // recognizer never produces a single result — seen after rapid
+    // stop/start while a locale model is still settling. Users read it as
+    // "transcription is broken". The watchdog detects the pattern and
+    // rebuilds the analyzer pipeline in place; capture keeps running and
+    // accumulated text is kept. All fields guarded by stateLock.
+
+    /// Language of the current session, for pipeline rebuilds.
+    private var sessionLanguage: RecognitionLanguage = .english
+    /// When capture actually started delivering buffers (.distantFuture
+    /// until then, so the watchdog can't fire during model download).
+    private var audioStartedAt = Date.distantFuture
+    /// When the recognizer produced its first result (volatile or final).
+    private var firstResultAt: Date?
+    private var pipelineRestarts = 0
+    private var pipelineRestartInFlight = false
+    /// Audio flowing this long with zero results means the pipeline is mute.
+    private let mutePipelineTimeout: TimeInterval = 12
+
+    private func markAudioStarted() {
+        stateLock.lock()
+        audioStartedAt = Date()
+        stateLock.unlock()
+    }
+
+    private func noteFirstResult() {
+        stateLock.lock()
+        let isFirst = firstResultAt == nil
+        if isFirst { firstResultAt = Date() }
+        let elapsed = audioStartedAt.timeIntervalSinceNow * -1
+        stateLock.unlock()
+        if isFirst, elapsed.isFinite, elapsed > 0 {
+            SpeechService.diag(String(format: "longform first result %.1fs after audio start", elapsed))
+        }
+    }
+
+    /// Called from the audio thread on every buffer (cheap checks first).
+    private func maybeRestartMutePipeline(now: Date) {
+        stateLock.lock()
+        let shouldRestart = isRunning && !pipelineRestartInFlight
+            && firstResultAt == nil
+            && pipelineRestarts < 2
+            && sessionPeakLevel > 0.1
+            && now.timeIntervalSince(audioStartedAt) > mutePipelineTimeout
+        if shouldRestart {
+            pipelineRestartInFlight = true
+            pipelineRestarts += 1
+        }
+        stateLock.unlock()
+        guard shouldRestart else { return }
+        SpeechService.diag("longform watchdog: audio flowing but no results in \(Int(mutePipelineTimeout))s — rebuilding analyzer")
+        DispatchQueue.main.async { [weak self] in
+            self?.onStatus?("Recognition stalled — restarting…")
+            self?.rebuildMutePipeline()
+        }
+    }
+
+    /// Tears down the mute analyzer and builds a fresh one against the same
+    /// running capture. Main thread (gen is only touched on main).
+    private func rebuildMutePipeline() {
+        guard isRunning else { return }
+        gen &+= 1
+        let myGen = gen
+        stateLock.lock()
+        let oldBuilder = inputBuilder
+        inputBuilder = nil // the tap drops buffers until the new pipeline lands
+        let oldAnalyzer = analyzer
+        analyzer = nil
+        resultsTask?.cancel()
+        resultsTask = nil
+        let language = sessionLanguage
+        stateLock.unlock()
+        oldBuilder?.finish()
+        Task { [weak self] in
+            try? await oldAnalyzer?.finalizeAndFinishThroughEndOfInput()
+            guard let self else { return }
+            do {
+                let ok = try await self.setupAnalyzerPipeline(language: language, gen: myGen)
+                SpeechService.diag("longform watchdog rebuild \(ok ? "OK" : "stale")")
+            } catch {
+                SpeechService.diag("longform watchdog rebuild FAILED: \(error)")
+            }
+            self.stateLock.lock()
+            self.pipelineRestartInFlight = false
+            self.audioStartedAt = Date() // re-arm the timeout for a second try
+            self.stateLock.unlock()
+        }
+    }
+
     func start(language: RecognitionLanguage) {
         guard !isRunning else { return }
         gen &+= 1
@@ -203,6 +295,11 @@ final class LongFormTranscriber {
         finalizedText = ""
         volatileText = ""
         sessionPeakLevel = 0
+        sessionLanguage = language
+        audioStartedAt = .distantFuture
+        firstResultAt = nil
+        pipelineRestarts = 0
+        pipelineRestartInFlight = false
         stateLock.unlock()
         tapBufferCount = 0
         voiceActive = false
@@ -247,69 +344,77 @@ final class LongFormTranscriber {
         // The session may be stopped (or superseded) while any of the awaits
         // below are in flight; continuing to set up a dead session corrupts
         // the newer one and can trap inside the Speech framework.
-        func stale() -> Bool { myGen != gen || !isRunning }
         do {
-            // fastResults trades a little accuracy for much lower latency on
-            // the volatile (caption) results; finals are unaffected.
-            let transcriber = SpeechTranscriber(
-                locale: language.locale,
-                transcriptionOptions: [],
-                reportingOptions: [.volatileResults, .fastResults],
-                // Word-level audio time ranges: pauses the recognizer absorbs
-                // into a run's duration are the only reliable utterance signal
-                // (result-level ranges are gapless; see segmentedFinalText).
-                attributeOptions: [.audioTimeRange]
-            )
-
-            // Download the long-form model for this locale if it's missing.
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                SpeechService.diag("longform downloading speech assets…")
-                DispatchQueue.main.async { [weak self] in
-                    self?.onStatus?("Downloading \(language.displayName) model…")
-                }
-                try await request.downloadAndInstall()
-                DispatchQueue.main.async { [weak self] in self?.onStatus?("Model ready") }
-            }
-            guard !stale() else { deliverFinish(gen: myGen); return }
-
-            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                SpeechService.diag("longform FAILED: no compatible audio format")
+            guard try await setupAnalyzerPipeline(language: language, gen: myGen) else {
                 deliverFinish(gen: myGen)
                 return
             }
-            guard !stale() else { deliverFinish(gen: myGen); return }
-            setPipeline(transcriber: transcriber, format: format)
-
-            let (stream, builder) = AsyncStream<AnalyzerInput>.makeStream()
-            let analyzer = SpeechAnalyzer(modules: [transcriber])
-            try await analyzer.start(inputSequence: stream)
-            guard !stale() else {
-                builder.finish()
-                try? await analyzer.finalizeAndFinishThroughEndOfInput()
-                deliverFinish(gen: myGen)
-                return
-            }
-            setStream(builder: builder, analyzer: analyzer)
-
-            startResultsTask(transcriber, gen: myGen)
-
             // Use the system default input as-is. Forcing the built-in mic
             // (like push-to-talk does) records silence in clamshell mode with
             // an external display — the lid mic hears nothing — and a meeting
             // setup often has a better external mic selected anyway.
-            guard !stale() else { deliverFinish(gen: myGen); return }
+            guard myGen == gen, isRunning else { deliverFinish(gen: myGen); return }
             switch audioSource {
             case .microphone:
                 try await MainActor.run { try startEngine() }
             case .systemAudio:
                 try await startSystemCapture()
             }
+            markAudioStarted()
             SpeechService.diag("longform running source=\(audioSource)")
         } catch {
             SpeechService.diag("longform FAILED: \(error)")
             stopEngine()
             deliverFinish(gen: myGen)
         }
+    }
+
+    /// Builds the transcriber + analyzer + results task. Returns false when
+    /// the session went stale mid-setup. Shared by the initial start and the
+    /// mute-pipeline watchdog (which rebuilds it while capture keeps running).
+    private func setupAnalyzerPipeline(language: RecognitionLanguage, gen myGen: Int) async throws -> Bool {
+        func stale() -> Bool { myGen != gen || !isRunning }
+        // fastResults trades a little accuracy for much lower latency on
+        // the volatile (caption) results; finals are unaffected.
+        let transcriber = SpeechTranscriber(
+            locale: language.locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults, .fastResults],
+            // Word-level audio time ranges: pauses the recognizer absorbs
+            // into a run's duration are the only reliable utterance signal
+            // (result-level ranges are gapless; see segmentedFinalText).
+            attributeOptions: [.audioTimeRange]
+        )
+
+        // Download the long-form model for this locale if it's missing.
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            SpeechService.diag("longform downloading speech assets…")
+            DispatchQueue.main.async { [weak self] in
+                self?.onStatus?("Downloading \(language.displayName) model…")
+            }
+            try await request.downloadAndInstall()
+            DispatchQueue.main.async { [weak self] in self?.onStatus?("Model ready") }
+        }
+        guard !stale() else { return false }
+
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            SpeechService.diag("longform FAILED: no compatible audio format")
+            return false
+        }
+        guard !stale() else { return false }
+        setPipeline(transcriber: transcriber, format: format)
+
+        let (stream, builder) = AsyncStream<AnalyzerInput>.makeStream()
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        try await analyzer.start(inputSequence: stream)
+        guard !stale() else {
+            builder.finish()
+            try? await analyzer.finalizeAndFinishThroughEndOfInput()
+            return false
+        }
+        setStream(builder: builder, analyzer: analyzer)
+        startResultsTask(transcriber, gen: myGen)
+        return true
     }
 
     /// Synchronous helpers so the async run() never touches the lock directly
@@ -333,6 +438,7 @@ final class LongFormTranscriber {
             do {
                 for try await result in transcriber.results {
                     guard let self, myGen == self.gen else { return }
+                    self.noteFirstResult()
                     // Finals carry per-word audio time ranges; pauses hide in
                     // run durations (result-level ranges are gapless, and
                     // volatile results have no time structure at all — one

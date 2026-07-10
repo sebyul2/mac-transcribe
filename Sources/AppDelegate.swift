@@ -65,9 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Undo any output mute and restore the user's original input device that we
-        // switched to the built-in mic while the app was running.
+        // Undo any output mute/duck and restore the user's original input
+        // device that we switched to the built-in mic while the app ran.
         SystemAudio.restoreOutput()
+        SystemAudio.unduckOutput()
         SystemAudio.restoreInput()
     }
 

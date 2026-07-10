@@ -38,9 +38,15 @@ final class SpeechOutput {
     private let duckFactor: Float = 0.5
     private let voiceBoost: Float = 1.8
 
-    /// Speech rate: a touch above default reads urgent enough for live
-    /// interpretation without sounding rushed (user-tuned).
-    private let rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+    /// Default system speech rate (user-tuned; boosts read as rushed).
+    private let rate = AVSpeechUtteranceDefaultSpeechRate
+
+    /// How long an idle voice waits for more shards before speaking an
+    /// unterminated fragment. A slow speaker produces small shards with real
+    /// pauses between them; reading each one the moment it arrives yields
+    /// "two words — silence — two words". Waiting a beat merges them into a
+    /// phrase, while sentence-final punctuation still speaks immediately.
+    private let aggregationDelay: TimeInterval = 0.6
 
     /// Drop the oldest buffered text past this size (~30 s of speech) —
     /// beyond that the voice can never catch back up to the conversation.
@@ -62,6 +68,29 @@ final class SpeechOutput {
 
     init() {
         engine.attach(player)
+        // The output device can change mid-session — headset unplugged,
+        // clamshell switch to the built-in speakers, AirPods connecting.
+        // The engine stops itself and posts this notification; without
+        // rebuilding the connection the voice goes silent on the new device.
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.handleOutputDeviceChange()
+        }
+    }
+
+    /// Rebuilds the render path after the system output device changed.
+    /// The utterance playing at the moment of the switch is lost (its
+    /// buffers were scheduled against the dead device); anything still in
+    /// the text buffer resumes on the new device.
+    private func handleOutputDeviceChange() {
+        SpeechService.diag("speech output device changed — reconnecting engine")
+        player.stop()
+        if let format = connectedFormat {
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+        }
+        speaking = false
+        pump()
     }
 
     // MARK: - Input
@@ -80,7 +109,35 @@ final class SpeechOutput {
             }
             buffer = tail
         }
+        // A finished sentence speaks now; a fragment waits a beat for the
+        // shards that usually follow it (see aggregationDelay). While the
+        // voice is busy, pump() is a no-op either way and the finish handler
+        // picks the buffer up.
+        if let last = buffer.last, ".。?？!！…".contains(last) {
+            pumpNow()
+        } else {
+            schedulePump()
+        }
+    }
+
+    private var pendingPump: DispatchWorkItem?
+
+    private func pumpNow() {
+        pendingPump?.cancel()
+        pendingPump = nil
         pump()
+    }
+
+    /// One timer from the FIRST fragment — later fragments must not keep
+    /// re-arming it or a steady trickle would starve the voice forever.
+    private func schedulePump() {
+        guard pendingPump == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingPump = nil
+            self?.pump()
+        }
+        pendingPump = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + aggregationDelay, execute: work)
     }
 
     /// Session start: silence anything left from the previous session.
@@ -88,6 +145,8 @@ final class SpeechOutput {
         generation &+= 1
         buffer = ""
         speaking = false
+        pendingPump?.cancel()
+        pendingPump = nil
         player.stop()
         cancelUnduck()
         SystemAudio.unduckOutput()
@@ -149,8 +208,13 @@ final class SpeechOutput {
         engine.mainMixerNode.outputVolume = duckOthers ? voiceBoost : 1.0
         if !engine.isRunning {
             do { try engine.start() } catch {
-                SpeechService.diag("speech engine start FAILED: \(error.localizedDescription)")
-                return
+                // One retry after a fresh connect — a device swap can leave
+                // the graph pointing at a dead output.
+                engine.connect(player, to: engine.mainMixerNode, format: pcm.format)
+                do { try engine.start() } catch {
+                    SpeechService.diag("speech engine start FAILED: \(error.localizedDescription)")
+                    return
+                }
             }
         }
         if !player.isPlaying { player.play() }
