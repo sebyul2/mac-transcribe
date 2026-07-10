@@ -314,9 +314,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         chatgptAuthButton.action = #selector(chatgptAuthTapped)
         place(chatgptAuthButton, x: fieldX, top: 194, w: 200, h: 28, in: view)
 
+        // Meeting glossary lives INSIDE the Meeting section: STT corrections
+        // + domain terms for notes.
+        _ = label("Glossary:", top: 230, in: view)
+        glossaryStatusLabel.font = .systemFont(ofSize: 11)
+        glossaryStatusLabel.textColor = .secondaryLabelColor
+        glossaryStatusLabel.lineBreakMode = .byTruncatingMiddle
+        place(glossaryStatusLabel, x: fieldX, top: 230, w: 140, h: 22, in: view)
+        let chooseButton = NSButton(title: "Attach…", target: self, action: #selector(chooseGlossaryTapped))
+        chooseButton.bezelStyle = .rounded
+        place(chooseButton, x: fieldX + 146, top: 226, w: 82, height: 28, in: view)
+        let editButton = NSButton(title: "Edit", target: self, action: #selector(editGlossaryTapped))
+        editButton.bezelStyle = .rounded
+        place(editButton, x: fieldX + 232, top: 226, w: 68, height: 28, in: view)
+
         // Translation category — which engine translates live sessions.
-        sectionLabel("Translation", top: 236, in: view)
-        _ = label("Provider:", top: 264, in: view)
+        sectionLabel("Translation", top: 266, in: view)
+        _ = label("Provider:", top: 294, in: view)
         transProviderPopup.target = self
         transProviderPopup.action = #selector(transProviderChanged)
         for (id, title) in [("apple", "Apple Translation (on-device, free)"),
@@ -325,17 +339,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             transProviderPopup.addItem(withTitle: title)
             transProviderPopup.lastItem?.representedObject = id
         }
-        place(transProviderPopup, x: fieldX, top: 262, w: fieldW, in: view)
+        place(transProviderPopup, x: fieldX, top: 292, w: fieldW, in: view)
 
-        transModelLabel = label("Model:", top: 300, in: view)
+        transModelLabel = label("Model:", top: 330, in: view)
         transModelPopup.target = self
         transModelPopup.action = #selector(transModelChanged)
-        place(transModelPopup, x: fieldX, top: 298, w: fieldW, in: view)
+        place(transModelPopup, x: fieldX, top: 328, w: fieldW, in: view)
 
         // The DeepL key shares the model row — exactly one of them shows,
         // depending on the translation provider.
-        deeplKeyLabel = label("DeepL API Key:", top: 300, in: view)
-        place(deeplKeyField, x: fieldX, top: 298, w: fieldW - 86, in: view)
+        deeplKeyLabel = label("DeepL API Key:", top: 330, in: view)
+        place(deeplKeyField, x: fieldX, top: 328, w: fieldW - 86, in: view)
         deeplKeyField.isEditable = true; deeplKeyField.isBezeled = true
         deeplKeyField.bezelStyle = .roundedBezel
         deeplKeyField.placeholderString = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -344,35 +358,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         deeplTestButton.bezelStyle = .rounded
         deeplTestButton.target = self
         deeplTestButton.action = #selector(deeplTestTapped)
-        place(deeplTestButton, x: fieldX + fieldW - 80, top: 297, w: 80, height: 28, in: view)
-
-        // Meeting glossary: STT corrections + domain terms for notes.
-        _ = label("Glossary:", top: 338, in: view)
-        glossaryStatusLabel.font = .systemFont(ofSize: 11)
-        glossaryStatusLabel.textColor = .secondaryLabelColor
-        glossaryStatusLabel.lineBreakMode = .byTruncatingMiddle
-        place(glossaryStatusLabel, x: fieldX, top: 338, w: 140, h: 22, in: view)
-        let chooseButton = NSButton(title: "Attach…", target: self, action: #selector(chooseGlossaryTapped))
-        chooseButton.bezelStyle = .rounded
-        place(chooseButton, x: fieldX + 146, top: 334, w: 82, height: 28, in: view)
-        let editButton = NSButton(title: "Edit", target: self, action: #selector(editGlossaryTapped))
-        editButton.bezelStyle = .rounded
-        place(editButton, x: fieldX + 232, top: 334, w: 68, height: 28, in: view)
+        place(deeplTestButton, x: fieldX + fieldW - 80, top: 327, w: 80, height: 28, in: view)
 
         // Translation glossary: source-term -> target-term pairs, a separate
         // file — mixing it with the STT-correction glossary made every "->"
         // line ambiguous. Feeds DeepL Voice sessions and the LLM quality pass.
-        _ = label("Trans. Glossary:", top: 372, in: view)
+        _ = label("Trans. Glossary:", top: 366, in: view)
         transGlossaryStatusLabel.font = .systemFont(ofSize: 11)
         transGlossaryStatusLabel.textColor = .secondaryLabelColor
         transGlossaryStatusLabel.lineBreakMode = .byTruncatingMiddle
-        place(transGlossaryStatusLabel, x: fieldX, top: 372, w: 140, h: 22, in: view)
+        place(transGlossaryStatusLabel, x: fieldX, top: 366, w: 140, h: 22, in: view)
         let transChooseButton = NSButton(title: "Attach…", target: self, action: #selector(chooseTransGlossaryTapped))
         transChooseButton.bezelStyle = .rounded
-        place(transChooseButton, x: fieldX + 146, top: 368, w: 82, height: 28, in: view)
+        place(transChooseButton, x: fieldX + 146, top: 362, w: 82, height: 28, in: view)
         let transEditButton = NSButton(title: "Edit", target: self, action: #selector(editTransGlossaryTapped))
         transEditButton.bezelStyle = .rounded
-        place(transEditButton, x: fieldX + 232, top: 368, w: 68, height: 28, in: view)
+        place(transEditButton, x: fieldX + 232, top: 362, w: 68, height: 28, in: view)
 
         statusLabel.alignment = .left
         statusLabel.maximumNumberOfLines = 2
