@@ -72,6 +72,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let testSynthesizer = AVSpeechSynthesizer()
     // Engine — shared
     private let glossaryStatusLabel = NSTextField(labelWithString: "")
+    private let transGlossaryStatusLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
 
     /// Sentinel id for the Claude Code CLI meeting provider (not an LLM API).
@@ -83,7 +84,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 470),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -139,7 +140,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         place(v, x: x, top: top, w: w, h: height, in: view)
     }
     /// Usable height inside a tab (window minus the tab strip/chrome).
-    private let tabHeight: CGFloat = 430
+    private let tabHeight: CGFloat = 460
     private let fieldX: CGFloat = 150
     private let fieldW: CGFloat = 300
 
@@ -345,6 +346,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         deeplTestButton.action = #selector(deeplTestTapped)
         place(deeplTestButton, x: fieldX + fieldW - 80, top: 297, w: 80, height: 28, in: view)
 
+        // Meeting glossary: STT corrections + domain terms for notes.
         _ = label("Glossary:", top: 338, in: view)
         glossaryStatusLabel.font = .systemFont(ofSize: 11)
         glossaryStatusLabel.textColor = .secondaryLabelColor
@@ -357,19 +359,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         editButton.bezelStyle = .rounded
         place(editButton, x: fieldX + 232, top: 334, w: 68, height: 28, in: view)
 
+        // Translation glossary: source-term -> target-term pairs, a separate
+        // file — mixing it with the STT-correction glossary made every "->"
+        // line ambiguous. Feeds DeepL Voice sessions and the LLM quality pass.
+        _ = label("Trans. Glossary:", top: 372, in: view)
+        transGlossaryStatusLabel.font = .systemFont(ofSize: 11)
+        transGlossaryStatusLabel.textColor = .secondaryLabelColor
+        transGlossaryStatusLabel.lineBreakMode = .byTruncatingMiddle
+        place(transGlossaryStatusLabel, x: fieldX, top: 372, w: 140, h: 22, in: view)
+        let transChooseButton = NSButton(title: "Attach…", target: self, action: #selector(chooseTransGlossaryTapped))
+        transChooseButton.bezelStyle = .rounded
+        place(transChooseButton, x: fieldX + 146, top: 368, w: 82, height: 28, in: view)
+        let transEditButton = NSButton(title: "Edit", target: self, action: #selector(editTransGlossaryTapped))
+        transEditButton.bezelStyle = .rounded
+        place(transEditButton, x: fieldX + 232, top: 368, w: 68, height: 28, in: view)
+
         statusLabel.alignment = .left
         statusLabel.maximumNumberOfLines = 2
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.textColor = .secondaryLabelColor
-        place(statusLabel, x: 20, top: 368, w: 300, h: 34, in: view)
+        place(statusLabel, x: 20, top: 404, w: 300, h: 34, in: view)
 
         let testButton = NSButton(title: "Test", target: self, action: #selector(testTapped))
         testButton.bezelStyle = .rounded
-        place(testButton, x: 260, top: 394, w: 90, h: 30, in: view)
+        place(testButton, x: 260, top: 424, w: 90, h: 30, in: view)
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveTapped))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
-        place(saveButton, x: 360, top: 394, w: 100, h: 30, in: view)
+        place(saveButton, x: 360, top: 424, w: 100, h: 30, in: view)
     }
 
     // MARK: - Load
@@ -660,6 +677,44 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             glossaryStatusLabel.stringValue = "None (optional)"
             glossaryStatusLabel.textColor = .secondaryLabelColor
         }
+        let pairCount = s.translationGlossaryPairs.count
+        if pairCount > 0 {
+            transGlossaryStatusLabel.stringValue = "✓ \(pairCount) pairs — \(s.translationGlossaryURL.lastPathComponent)"
+            transGlossaryStatusLabel.textColor = .systemGreen
+        } else {
+            transGlossaryStatusLabel.stringValue = "None (optional)"
+            transGlossaryStatusLabel.textColor = .secondaryLabelColor
+        }
+    }
+
+    @objc private func chooseTransGlossaryTapped() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText]
+        panel.message = "번역 용어집 선택 — 한 줄에 하나씩 \"원어 용어 -> 번역어 용어\""
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Settings.shared.translationGlossaryURL = url
+            self?.refreshGlossaryStatus()
+        }
+    }
+
+    @objc private func editTransGlossaryTapped() {
+        let url = Settings.shared.translationGlossaryURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            let template = """
+            # Mac Transcribe 번역 용어집 — 한 줄에 하나씩 "원어 -> 번역어".
+            # 이 용어가 원문에 나오면 지정한 번역으로 옮깁니다.
+            # 예시:
+            # 投放 -> 캠페인 집행
+            # Findlab -> 파인드랩
+            """
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? template.write(to: url, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func chooseGlossaryTapped() {

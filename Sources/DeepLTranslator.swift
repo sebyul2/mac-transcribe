@@ -109,6 +109,64 @@ enum DeepLTranslator {
         }.resume()
     }
 
+    // MARK: - Glossaries
+
+    /// Creates (or reuses) a DeepL glossary from `A -> B` mapping lines and
+    /// returns its id for use in Voice sessions. Glossaries are immutable on
+    /// DeepL's side, so the id is cached against a content hash — the API is
+    /// only hit when the terms or the language pair change.
+    static func ensureGlossary(
+        apiKey: String,
+        sourceLang: String,
+        targetLang: String,
+        entries: [(String, String)],
+        completion: @escaping (String?) -> Void
+    ) {
+        guard !entries.isEmpty, !sourceLang.isEmpty else {
+            completion(nil)
+            return
+        }
+        // DeepL glossaries use bare language codes (ko, not KO / ZH-HANS).
+        let src = String(sourceLang.prefix(2)).lowercased()
+        let tgt = String(targetLang.prefix(2)).lowercased()
+        let tsv = entries.map { "\($0.0)\t\($0.1)" }.joined(separator: "\n")
+        let cacheKey = "deeplGlossary:\(src)>\(tgt):\(tsv.hashValue)"
+        if let cached = UserDefaults.standard.string(forKey: cacheKey) {
+            completion(cached)
+            return
+        }
+
+        let baseURL = apiKey.hasSuffix(":fx")
+            ? "https://api-free.deepl.com/v2/glossaries"
+            : "https://api.deepl.com/v2/glossaries"
+        var req = URLRequest(url: URL(string: baseURL)!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        req.setValue("DeepL-Auth-Key \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "name": "MacTranscribe \(src)->\(tgt)",
+            "source_lang": src,
+            "target_lang": tgt,
+            "entries": tsv,
+            "entries_format": "tsv",
+        ])
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            guard let data,
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = json["glossary_id"] as? String else {
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                SpeechService.diag("deepl glossary create FAILED: \(body.prefix(200))")
+                completion(nil)
+                return
+            }
+            SpeechService.diag("deepl glossary created \(src)->\(tgt) entries=\(entries.count)")
+            UserDefaults.standard.set(id, forKey: cacheKey)
+            completion(id)
+        }.resume()
+    }
+
     private static func urlEncode(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)?
             .replacingOccurrences(of: "+", with: "%2B")

@@ -415,6 +415,47 @@ final class Settings {
         return Array(terms.prefix(500))
     }
 
+    // MARK: - Translation glossary (separate file)
+    //
+    // The MEETING glossary corrects speech recognition (wrong-spelling ->
+    // right-spelling, same language). The TRANSLATION glossary maps source-
+    // language terms to target-language terms (投放 -> 캠페인 집행). Mixing
+    // them in one file made each line's meaning ambiguous.
+
+    static var defaultTranslationGlossaryURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/macwhisper/translation-glossary.txt")
+    }
+
+    var translationGlossaryURL: URL {
+        get {
+            if let path = defaults.string(forKey: "translationGlossaryPath"), !path.isEmpty {
+                return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            }
+            return Self.defaultTranslationGlossaryURL
+        }
+        set { defaults.set(newValue.path, forKey: "translationGlossaryPath") }
+    }
+
+    var translationGlossaryText: String {
+        guard let text = try? String(contentsOf: translationGlossaryURL, encoding: .utf8) else { return "" }
+        return String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8000))
+    }
+
+    /// "원어 -> 번역어" pairs from the translation glossary.
+    var translationGlossaryPairs: [(String, String)] {
+        var pairs: [(String, String)] = []
+        for rawLine in translationGlossaryText.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            guard let range = line.range(of: "->") ?? line.range(of: "→") else { continue }
+            let source = String(line[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let target = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if !source.isEmpty, !target.isEmpty { pairs.append((source, target)) }
+        }
+        return Array(pairs.prefix(500))
+    }
+
     /// LLM refinement is usable only when enabled and minimally configured.
     /// The ChatGPT subscription provider authenticates via OAuth, not an API key.
     var llmConfigured: Bool {

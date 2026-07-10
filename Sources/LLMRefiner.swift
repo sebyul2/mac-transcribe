@@ -237,6 +237,22 @@ enum LLMRefiner {
         if isFragment {
             prompt += "\n\nThe text is an unfinished utterance still being spoken; translate it naturally as-is, without completing it."
         }
+        // The TRANSLATION glossary (separate from the meeting/STT one) rides
+        // only on the quality pass (effort > none): the live loop is
+        // latency-critical and its output gets replaced anyway.
+        if effort != "none" {
+            let glossary = settings.translationGlossaryText
+            if !glossary.isEmpty {
+                prompt += """
+
+
+                Glossary — lines of the form "A -> B" mean: when the source contains term A, \
+                translate it as B. Apply only when the term actually appears.
+
+                \(glossary.prefix(2000))
+                """
+            }
+        }
         if let previousTranslation {
             prompt += """
 

@@ -779,12 +779,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session.onError = { [weak self] message in
             self?.handleVoiceError(message, from: session)
         }
-        session.start(
-            apiKey: settings.deeplAPIKey,
-            sourceLang: settings.deeplSourceLang,
-            targetLang: settings.deeplTargetLang)
+        // Hook the audio first — the session buffers pre-connection audio,
+        // so nothing is lost while the glossary/session request runs.
         longForm.externalAudioSink = { [weak session] buffer in
             session?.feed(buffer)
+        }
+        let apiKey = settings.deeplAPIKey
+        let sourceLang = settings.deeplSourceLang
+        let targetLang = settings.deeplTargetLang
+        let launch: (String?) -> Void = { [weak self, weak session] glossaryID in
+            guard let self, let session, self.voiceSession === session else { return }
+            session.start(apiKey: apiKey, sourceLang: sourceLang,
+                          targetLang: targetLang, glossaryID: glossaryID)
+        }
+        // Glossary terms ride along when the user has "A -> B" pairs and a
+        // fixed source language (DeepL glossaries are per language pair).
+        let pairs = settings.translationGlossaryPairs
+        if pairs.isEmpty || sourceLang.isEmpty {
+            launch(nil)
+        } else {
+            DeepLTranslator.ensureGlossary(
+                apiKey: apiKey, sourceLang: sourceLang, targetLang: targetLang,
+                entries: pairs
+            ) { glossaryID in
+                DispatchQueue.main.async { launch(glossaryID) }
+            }
         }
     }
 

@@ -72,10 +72,12 @@ final class DeepLVoiceSession: NSObject {
     // MARK: - Lifecycle
 
     /// Requests a session and connects. `sourceLang`/`targetLang` are DeepL
-    /// codes ("ja", "ko"); empty source means auto-detect.
-    func start(apiKey: String, sourceLang: String, targetLang: String) {
+    /// codes ("ja", "ko"); empty source means auto-detect. `glossaryID`
+    /// applies a pre-created DeepL glossary to the translations.
+    func start(apiKey: String, sourceLang: String, targetLang: String, glossaryID: String? = nil) {
         queue.async { [weak self] in
-            self?.requestAndConnect(apiKey: apiKey, sourceLang: sourceLang, targetLang: targetLang)
+            self?.requestAndConnect(apiKey: apiKey, sourceLang: sourceLang,
+                                    targetLang: targetLang, glossaryID: glossaryID)
         }
     }
 
@@ -110,7 +112,7 @@ final class DeepLVoiceSession: NSObject {
 
     // MARK: - Session setup
 
-    private func requestAndConnect(apiKey: String, sourceLang: String, targetLang: String) {
+    private func requestAndConnect(apiKey: String, sourceLang: String, targetLang: String, glossaryID: String?) {
         var body: [String: Any] = [
             "source_media_content_type": "audio/pcm;encoding=s16le;rate=16000",
             "target_languages": [targetLang.lowercased()],
@@ -119,6 +121,9 @@ final class DeepLVoiceSession: NSObject {
         if !sourceLang.isEmpty {
             body["source_language"] = sourceLang.lowercased()
             body["source_language_mode"] = "fixed"
+        }
+        if let glossaryID {
+            body["glossary_id"] = glossaryID
         }
         var req = URLRequest(url: URL(string: "https://api.deepl.com/v3/voice/realtime")!)
         req.httpMethod = "POST"
