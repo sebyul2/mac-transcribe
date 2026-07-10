@@ -29,14 +29,15 @@ final class SpeechOutput {
     /// BCP 47 tag choosing the voice, e.g. "ko-KR".
     var languageTag = "ko-KR"
 
-    /// System volume multiplier while ducked, and the compensating mixer
-    /// gain. The engine's own output ALSO passes through the ducked system
-    /// volume, so the boost claws the voice back toward its original
-    /// loudness (0.5 × 1.8 = 0.9× perceived) while everything else drops
-    /// to half. Boost is capped below the clipping range of typical TTS
-    /// waveform peaks.
-    private let duckFactor: Float = 0.5
-    private let voiceBoost: Float = 1.8
+    /// System volume multiplier while ducked. The engine's own output ALSO
+    /// passes through the ducked system volume, so the voice is compensated
+    /// with `voiceBoost` — applied in the SAMPLE domain through tanh (a soft
+    /// clipper), which lets the gain go well past what a linear mixer could
+    /// without hard clipping. That also makes the voice louder on outputs
+    /// whose system volume cannot be ducked at all (HDMI/DP monitors expose
+    /// no volume control) — there the boost is the only lever we have.
+    private let duckFactor: Float = 0.35
+    private let voiceBoost: Float = 2.4
 
     /// 10% above the system default (user-tuned: default read as sluggish,
     /// +25% as rushed).
@@ -206,7 +207,18 @@ final class SpeechOutput {
             engine.connect(player, to: engine.mainMixerNode, format: pcm.format)
             connectedFormat = pcm.format
         }
-        engine.mainMixerNode.outputVolume = duckOthers ? voiceBoost : 1.0
+        // Soft-clip boost in the sample domain (see voiceBoost). tanh
+        // compresses peaks smoothly, so 2.4× reads as "clearly louder"
+        // rather than distorted.
+        if duckOthers, let channels = pcm.floatChannelData {
+            for c in 0..<Int(pcm.format.channelCount) {
+                let samples = channels[c]
+                for i in 0..<Int(pcm.frameLength) {
+                    samples[i] = tanh(samples[i] * voiceBoost)
+                }
+            }
+        }
+        engine.mainMixerNode.outputVolume = 1.0
         if !engine.isRunning {
             do { try engine.start() } catch {
                 // One retry after a fresh connect — a device swap can leave
@@ -247,14 +259,14 @@ final class SpeechOutput {
     // MARK: - Ducking hysteresis
 
     /// Restore the system volume only after the voice has been idle for a
-    /// beat — the next shard usually arrives within a second, and pumping
-    /// the volume in every gap is worse than holding it down.
+    /// good while — sentence gaps run 1–2 s, and restoring inside them made
+    /// the master volume pump up and down through the whole session.
     private func scheduleUnduck() {
         guard duckOthers else { return }
         cancelUnduck()
         let work = DispatchWorkItem { SystemAudio.unduckOutput() }
         unduckWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
     }
 
     private func cancelUnduck() {

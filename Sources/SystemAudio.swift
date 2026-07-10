@@ -107,14 +107,26 @@ enum SystemAudio {
     /// Lower the default output volume to `factor` × its current value, so a
     /// spoken translation (played at boosted gain through the app's own audio
     /// engine) sits on top of the quieted original — like a real interpreter
-    /// feed. Safe to call repeatedly; only the first call samples the volume.
-    static func duckOutput(to factor: Float) {
-        guard duckedDevice == nil, let device = defaultOutputDeviceID(),
-              let volume = outputVolume(device) else { return }
+    /// feed. The change RAMPS over ~200 ms instead of jumping, which is what
+    /// made the ducking audible as volume "pumping". Safe to call repeatedly;
+    /// only the first call samples the volume.
+    ///
+    /// Returns false when the device exposes no volume control at all —
+    /// HDMI/DisplayPort monitor speakers are the common case — so callers
+    /// know the original audio CANNOT be quieted on this output.
+    @discardableResult
+    static func duckOutput(to factor: Float) -> Bool {
+        if duckedDevice != nil { return true } // already ducked
+        guard let device = defaultOutputDeviceID(),
+              let volume = outputVolume(device) else {
+            diag("duck unavailable: output device has no volume control (HDMI/DP monitor?)")
+            return false
+        }
         duckedDevice = device
         preDuckVolume = volume
-        setOutputVolume(device, volume * factor)
+        rampOutputVolume(device, from: volume, to: volume * factor)
         diag("ducked output \(volume) -> \(volume * factor)")
+        return true
     }
 
     /// Restore the volume we ducked. No-op unless duckOutput ran.
@@ -122,8 +134,22 @@ enum SystemAudio {
         guard let device = duckedDevice, let volume = preDuckVolume else { return }
         duckedDevice = nil
         preDuckVolume = nil
-        setOutputVolume(device, volume)
+        let current = outputVolume(device) ?? volume
+        rampOutputVolume(device, from: current, to: volume)
         diag("unducked output -> \(volume)")
+    }
+
+    /// Steps the volume across ~200 ms so duck/unduck fades instead of
+    /// jumping. Runs off-main; CoreAudio setters are thread-safe.
+    private static func rampOutputVolume(_ device: AudioDeviceID, from: Float, to: Float) {
+        DispatchQueue.global(qos: .userInteractive).async {
+            let steps = 6
+            for i in 1...steps {
+                let v = from + (to - from) * Float(i) / Float(steps)
+                setOutputVolume(device, v)
+                usleep(33_000)
+            }
+        }
     }
 
     /// Reads the device's output volume scalar. Tries the main element first;
