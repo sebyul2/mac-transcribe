@@ -1,3 +1,4 @@
+import AVFoundation
 import Cocoa
 import UniformTypeIdentifiers
 
@@ -14,7 +15,7 @@ import UniformTypeIdentifiers
 /// Popups and checkboxes persist immediately and fire `onSettingsChanged`;
 /// only free-text fields (custom base URL/model, DeepL key) go through their
 /// tab's Save button.
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     /// Injected so the General tab can capture new trigger keys.
     var fnMonitor: FnKeyMonitor?
     /// Fired after a trigger-key binding changes, so the app re-applies it.
@@ -38,10 +39,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let targetLangPopup = NSPopUpButton()
     private let transMicRadio = NSButton(radioButtonWithTitle: "Microphone", target: nil, action: nil)
     private let transSystemRadio = NSButton(radioButtonWithTitle: "System audio (what the Mac plays)", target: nil, action: nil)
-    private var deeplKeyLabel: NSTextField!
-    private let deeplKeyField = NSTextField()
-    private let deeplTestButton = NSButton()
-    private let deeplSaveButton = NSButton()
     private let subtitleCheck = NSButton(checkboxWithTitle: "Show subtitle overlay at the bottom of the screen", target: nil, action: nil)
     private let speakCheck = NSButton(checkboxWithTitle: "Read translations aloud (TTS)", target: nil, action: nil)
     private let duckCheck = NSButton(checkboxWithTitle: "Duck other audio while speaking", target: nil, action: nil)
@@ -65,6 +62,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let transProviderPopup = NSPopUpButton()
     private var transModelLabel: NSTextField!
     private let transModelPopup = NSPopUpButton()
+    private var deeplKeyLabel: NSTextField!
+    private let deeplKeyField = NSTextField()
+    private let deeplTestButton = NSButton()
+    /// True while the key field shows the masked placeholder rather than the
+    /// real key (which lives in Settings; the field is display-only then).
+    private var deeplKeyMasked = false
+    /// Voices the test confirmation so the whole audio chain is verified.
+    private let testSynthesizer = AVSpeechSynthesizer()
     // Engine — shared
     private let glossaryStatusLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
@@ -216,39 +221,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         place(transMicRadio, x: fieldX, top: 140, w: fieldW, h: 20, in: view)
         place(transSystemRadio, x: fieldX, top: 164, w: fieldW, h: 20, in: view)
 
-        deeplKeyLabel = label("DeepL API Key:", top: 202, in: view)
-        place(deeplKeyField, x: fieldX, top: 200, w: fieldW, in: view)
-        deeplKeyField.isEditable = true; deeplKeyField.isBezeled = true
-        deeplKeyField.bezelStyle = .roundedBezel
-        deeplKeyField.placeholderString = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-
-        deeplSaveButton.title = "Save Key"
-        deeplSaveButton.bezelStyle = .rounded
-        deeplSaveButton.target = self
-        deeplSaveButton.action = #selector(deeplSaveTapped)
-        place(deeplSaveButton, x: fieldX, top: 232, w: 100, height: 28, in: view)
-        deeplTestButton.title = "Test"
-        deeplTestButton.bezelStyle = .rounded
-        deeplTestButton.target = self
-        deeplTestButton.action = #selector(deeplTestTapped)
-        place(deeplTestButton, x: fieldX + 106, top: 232, w: 80, height: 28, in: view)
-
         subtitleCheck.target = self
         subtitleCheck.action = #selector(subtitleChanged)
-        place(subtitleCheck, x: 20, top: 272, w: 440, h: 20, in: view)
+        place(subtitleCheck, x: 20, top: 204, w: 440, h: 20, in: view)
 
         speakCheck.target = self
         speakCheck.action = #selector(speakChanged)
-        place(speakCheck, x: 20, top: 296, w: 440, h: 20, in: view)
+        place(speakCheck, x: 20, top: 228, w: 440, h: 20, in: view)
         duckCheck.target = self
         duckCheck.action = #selector(duckChanged)
-        place(duckCheck, x: 40, top: 318, w: 420, h: 20, in: view)
+        place(duckCheck, x: 40, top: 250, w: 420, h: 20, in: view)
 
         transStatusLabel.alignment = .left
         transStatusLabel.maximumNumberOfLines = 2
         transStatusLabel.lineBreakMode = .byWordWrapping
         transStatusLabel.textColor = .secondaryLabelColor
-        place(transStatusLabel, x: 20, top: 348, w: 440, h: 34, in: view)
+        place(transStatusLabel, x: 20, top: 284, w: 440, h: 34, in: view)
     }
 
     // MARK: - Meeting tab
@@ -342,6 +330,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         transModelPopup.action = #selector(transModelChanged)
         place(transModelPopup, x: fieldX, top: 298, w: fieldW, in: view)
 
+        // The DeepL key shares the model row — exactly one of them shows,
+        // depending on the translation provider.
+        deeplKeyLabel = label("DeepL API Key:", top: 300, in: view)
+        place(deeplKeyField, x: fieldX, top: 298, w: fieldW - 86, in: view)
+        deeplKeyField.isEditable = true; deeplKeyField.isBezeled = true
+        deeplKeyField.bezelStyle = .roundedBezel
+        deeplKeyField.placeholderString = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        deeplKeyField.delegate = self
+        deeplTestButton.title = "Test"
+        deeplTestButton.bezelStyle = .rounded
+        deeplTestButton.target = self
+        deeplTestButton.action = #selector(deeplTestTapped)
+        place(deeplTestButton, x: fieldX + fieldW - 80, top: 297, w: 80, height: 28, in: view)
+
         _ = label("Glossary:", top: 338, in: view)
         glossaryStatusLabel.font = .systemFont(ofSize: 11)
         glossaryStatusLabel.textColor = .secondaryLabelColor
@@ -380,7 +382,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         liveTranslationCheck.state = s.liveTranslationEnabled ? .on : .off
         transMicRadio.state = s.translationAudioSourceIsSystem ? .off : .on
         transSystemRadio.state = s.translationAudioSourceIsSystem ? .on : .off
-        deeplKeyField.stringValue = s.deeplAPIKey
+        deeplKeyField.stringValue = Self.maskedKey(s.deeplAPIKey)
+        deeplKeyMasked = !s.deeplAPIKey.isEmpty
         subtitleCheck.state = s.subtitleOverlayEnabled ? .on : .off
         speakCheck.state = s.speakTranslations ? .on : .off
         duckCheck.state = s.duckWhileSpeaking ? .on : .off
@@ -536,35 +539,60 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onSettingsChanged?()
     }
 
-    @objc private func deeplSaveTapped() {
-        Settings.shared.deeplAPIKey = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        transStatusLabel.textColor = .systemGreen
-        transStatusLabel.stringValue = "Saved."
+    // MARK: - DeepL key (masked display, plain while editing)
+
+    /// The key shows masked once entered — plain text only while the field
+    /// has focus, so a screen-share can't leak it. NSSecureTextField is NOT
+    /// used because it blocks paste.
+    private static func maskedKey(_ key: String) -> String {
+        guard key.count > 10 else { return key.isEmpty ? "" : "••••••••" }
+        return "\(key.prefix(4))••••••••••••\(key.suffix(4))"
+    }
+
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard (notification.object as? NSTextField) === deeplKeyField, deeplKeyMasked else { return }
+        deeplKeyMasked = false
+        deeplKeyField.stringValue = Settings.shared.deeplAPIKey
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard (notification.object as? NSTextField) === deeplKeyField, !deeplKeyMasked else { return }
+        let key = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        Settings.shared.deeplAPIKey = key
+        deeplKeyField.stringValue = Self.maskedKey(key)
+        deeplKeyMasked = true
         onSettingsChanged?()
     }
 
-    /// Tests the key against the VOICE endpoint (a session grant) — the
-    /// strictest check: it verifies the key, the paid plan, and Voice access
-    /// in one round-trip.
+    /// Tests the key against the VOICE endpoint (a session grant verifies the
+    /// key, the paid plan, and Voice access in one round-trip), then speaks a
+    /// confirmation so the whole audio chain is verified by ear.
     @objc private func deeplTestTapped() {
-        let key = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = Settings.shared.deeplAPIKey
         guard !key.isEmpty else {
-            transStatusLabel.textColor = .systemRed
-            transStatusLabel.stringValue = "Enter an API key first."
+            statusLabel.textColor = .systemRed
+            statusLabel.stringValue = "Enter the DeepL API key first."
             return
         }
-        transStatusLabel.textColor = .secondaryLabelColor
-        transStatusLabel.stringValue = "Testing Voice API…"
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.stringValue = "Testing Voice API…"
         DeepLVoiceSession.testConnection(apiKey: key) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
-                case .success(let sessionID):
-                    self.transStatusLabel.textColor = .systemGreen
-                    self.transStatusLabel.stringValue = "✓ Voice session granted (\(sessionID.prefix(8))…)"
+                case .success:
+                    self.statusLabel.textColor = .systemGreen
+                    self.statusLabel.stringValue = "✓ Voice session granted"
+                    let tag = SpeechOutput.languageTag(deepl: Settings.shared.deeplTargetLang, llm: "")
+                    let phrase = tag.hasPrefix("ko") ? "딥엘 보이스 연결이 확인되었습니다."
+                        : tag.hasPrefix("ja") ? "DeepL Voiceの接続が確認できました。"
+                        : "DeepL Voice connection verified."
+                    let utterance = AVSpeechUtterance(string: phrase)
+                    utterance.voice = AVSpeechSynthesisVoice(language: tag)
+                    self.testSynthesizer.speak(utterance)
                 case .failure(let error):
-                    self.transStatusLabel.textColor = .systemRed
-                    self.transStatusLabel.stringValue = "Failed: \(error.localizedDescription)"
+                    self.statusLabel.textColor = .systemRed
+                    self.statusLabel.stringValue = "Failed: \(error.localizedDescription)"
                 }
             }
         }
@@ -599,12 +627,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             selectByRepresented(sourceLangPopup, s.interpreterSourceLanguage)
             selectByRepresented(targetLangPopup, s.interpreterTargetLanguage)
         }
-        // DeepL key row only matters for DeepL providers.
-        let deepl = s.deeplEnabled
-        deeplKeyLabel.isHidden = !deepl
-        deeplKeyField.isHidden = !deepl
-        deeplTestButton.isHidden = !deepl
-        deeplSaveButton.isHidden = !deepl
     }
 
     // MARK: - Meeting actions
@@ -815,6 +837,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let llm = Settings.shared.translationProvider == "llm"
         transModelLabel.isHidden = !llm
         transModelPopup.isHidden = !llm
+        deeplKeyLabel.isHidden = llm
+        deeplKeyField.isHidden = llm
+        deeplTestButton.isHidden = llm
     }
 
     // MARK: - Engine shared actions
