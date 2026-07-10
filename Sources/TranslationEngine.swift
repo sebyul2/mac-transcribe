@@ -416,7 +416,9 @@ final class TranslationEngine {
             }
         case .failure(let error):
             SpeechService.diag("translate live FAILED: \(error.localizedDescription)")
-            noteFailure()
+            // The breaker protects against hammering a dead NETWORK backend;
+            // on-device failures cost nothing and must not silence the engine.
+            if appleTranslator == nil { noteFailure() }
         }
         render()
         schedule()
@@ -436,7 +438,7 @@ final class TranslationEngine {
             }
         case .failure(let error):
             SpeechService.diag("translate quality FAILED: \(error.localizedDescription)")
-            noteFailure()
+            if appleTranslator == nil { noteFailure() }
             if let i = index(of: req.id) { utterances[i].qualityAttempts += 1 }
         }
         render()

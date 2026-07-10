@@ -93,8 +93,14 @@ final class AppleTranslator {
 
     /// Translate one string. `completion` runs on a background queue; nil on
     /// any failure (caller keeps the original text or falls back).
+    ///
+    /// Requests made BEFORE the session finishes preparing are queued, not
+    /// rejected — the stream is only drained once the session is ready, so
+    /// the first sentences of a recording translate the moment preparation
+    /// completes instead of being dropped (which used to trip the engine's
+    /// failure breaker and silence translation for ~30 s).
     func translate(_ text: String, completion: @escaping (String?) -> Void) {
-        guard isReady, let continuation else {
+        guard let continuation else {
             completion(nil)
             return
         }
@@ -144,13 +150,16 @@ private struct TranslatorHostView: View {
                         try await session.prepareTranslation()
                     case .unsupported:
                         onReady(false)
+                        for await request in requests { request.completion(nil) }
                         return
                     @unknown default:
                         onReady(false)
+                        for await request in requests { request.completion(nil) }
                         return
                     }
                 } catch {
                     onReady(false)
+                    for await request in requests { request.completion(nil) }
                     return
                 }
                 onReady(true)
