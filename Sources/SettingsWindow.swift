@@ -337,14 +337,32 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onSettingsChanged?()
     }
 
+    /// Speech-to-text must listen in the language being SPOKEN — a Korean
+    /// recognizer turns Japanese speech into garbage before DeepL ever sees
+    /// it. Pinning a DeepL source therefore drags the recognition language
+    /// along; Auto leaves it alone.
+    private static let deeplToRecognition: [String: RecognitionLanguage] = [
+        "EN": .english, "KO": .korean, "JA": .japanese, "ZH": .simplifiedChinese,
+    ]
+
     @objc private func deeplSaveTapped() {
         let s = Settings.shared
         s.deeplAPIKey = deeplKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         s.deeplSourceLang = represented(deeplSourcePopup)
         s.deeplTargetLang = represented(deeplTargetPopup)
         s.deeplEnabled = deeplEnabledCheck.state == .on
+
         deeplStatusLabel.textColor = .systemGreen
         deeplStatusLabel.stringValue = "Saved."
+        if let recognition = Self.deeplToRecognition[s.deeplSourceLang],
+           s.language != recognition {
+            s.language = recognition
+            selectByRepresented(recognitionPopup, recognition.rawValue)
+            deeplStatusLabel.stringValue = "Saved. Recognition language → \(recognition.displayName) (전사는 발화 언어로 들어야 번역이 됩니다)"
+        } else if !s.deeplSourceLang.isEmpty, Self.deeplToRecognition[s.deeplSourceLang] == nil {
+            deeplStatusLabel.textColor = .systemOrange
+            deeplStatusLabel.stringValue = "Saved — but speech recognition does not support this source language."
+        }
         onSettingsChanged?()
     }
 
