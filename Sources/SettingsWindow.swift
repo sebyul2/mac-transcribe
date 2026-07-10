@@ -49,6 +49,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let deeplSourcePopup = NSPopUpButton()
     private let deeplTargetPopup = NSPopUpButton()
     private let deeplSpeakCheck = NSButton(checkboxWithTitle: "Read translations aloud (TTS)", target: nil, action: nil)
+    private let deeplDuckCheck = NSButton(checkboxWithTitle: "Duck other audio while speaking", target: nil, action: nil)
     private let deeplStatusLabel = NSTextField(labelWithString: "")
 
     // Engine (LLM)
@@ -291,17 +292,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         deeplSpeakCheck.action = #selector(deeplSpeakChanged)
         place(deeplSpeakCheck, x: 20, top: 200, w: 440, h: 20, in: view)
 
+        deeplDuckCheck.target = self
+        deeplDuckCheck.action = #selector(deeplDuckChanged)
+        place(deeplDuckCheck, x: 40, top: 222, w: 420, h: 20, in: view)
+
         let mutualNote = NSTextField(wrappingLabelWithString:
             "DeepL을 켜면 Translation 탭의 LLM 번역은 자동으로 비활성됩니다. "
             + "용어집(Glossary)은 Engine 탭에서 첨부할 수 있으며 LLM 회의록·보정에 반영됩니다.")
         mutualNote.font = .systemFont(ofSize: 11); mutualNote.textColor = .secondaryLabelColor
-        place(mutualNote, x: 20, top: 224, w: 440, h: 32, in: view)
+        place(mutualNote, x: 20, top: 246, w: 440, h: 32, in: view)
 
         deeplStatusLabel.alignment = .left
         deeplStatusLabel.maximumNumberOfLines = 2
         deeplStatusLabel.lineBreakMode = .byWordWrapping
         deeplStatusLabel.textColor = .secondaryLabelColor
-        place(deeplStatusLabel, x: 20, top: 268, w: 440, h: 40, in: view)
+        place(deeplStatusLabel, x: 20, top: 284, w: 440, h: 30, in: view)
 
         let testButton = NSButton(title: "Test", target: self, action: #selector(deeplTestTapped))
         testButton.bezelStyle = .rounded
@@ -324,6 +329,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func deeplSpeakChanged() {
         Settings.shared.speakTranslations = deeplSpeakCheck.state == .on
+        onSettingsChanged?()
+    }
+
+    @objc private func deeplDuckChanged() {
+        Settings.shared.duckWhileSpeaking = deeplDuckCheck.state == .on
         onSettingsChanged?()
     }
 
@@ -461,6 +471,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         selectByRepresented(deeplSourcePopup, s.deeplSourceLang)
         selectByRepresented(deeplTargetPopup, s.deeplTargetLang)
         deeplSpeakCheck.state = s.speakTranslations ? .on : .off
+        deeplDuckCheck.state = s.duckWhileSpeaking ? .on : .off
 
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off

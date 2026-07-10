@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let longForm = LongFormTranscriber()
     /// Live utterance-by-utterance translation for the interpreter mode.
     private let translator = TranslationEngine()
+    /// Voices translated utterances (continuous TTS with optional ducking).
+    private let speechOutput = SpeechOutput()
 
     /// What a locked session is for: a meeting capture (transcript + optional
     /// refinement/minutes) or one-way live interpretation (translated captions;
@@ -280,6 +282,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // untranslated line's source fallback) dimmed.
             self?.subtitles.update(pieces: caption.map { ($0.text, $0.committed) })
         }
+        translator.onSpeakableTranslation = { [weak self] text in
+            self?.speechOutput.enqueue(text)
+        }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         longForm.onStatus = { [weak self] status in
             self?.transcriptWindow.setStatus(status)
@@ -436,7 +441,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockMode = mode
         if mode == .interpreter {
             translator.reset()
-            translator.speakTranslations = settings.speakTranslations
+            speechOutput.reset()
+            speechOutput.enabled = settings.speakTranslations
+            speechOutput.duckOthers = settings.duckWhileSpeaking
+            speechOutput.languageTag = SpeechOutput.languageTag(
+                deepl: settings.deeplEnabled ? settings.deeplTargetLang : "",
+                llm: settings.interpreterTargetLanguage)
             if settings.deeplEnabled && settings.deeplConfigured {
                 translator.useDeepL = true
                 translator.deeplAPIKey = settings.deeplAPIKey
@@ -540,6 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcriptWindow.setRecording(false)
         subtitles.hide()
         translator.teardown()
+        speechOutput.endSession()
         postRecordingTasks = 0
         finishLockedSession(with: text)
         // If no post-recording tasks were started (no refinement, no notes),

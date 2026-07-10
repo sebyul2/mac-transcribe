@@ -228,6 +228,13 @@ final class Settings {
         set { defaults.set(newValue, forKey: "speakTranslations") }
     }
 
+    /// Duck the system output volume while a spoken translation plays, so
+    /// the voice sits on top of the (quieted) original audio.
+    var duckWhileSpeaking: Bool {
+        get { defaults.bool(forKey: "duckWhileSpeaking") }
+        set { defaults.set(newValue, forKey: "duckWhileSpeaking") }
+    }
+
     var deeplConfigured: Bool {
         !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
     }

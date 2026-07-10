@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 
 /// Live translation for locked (interpreter) sessions.
@@ -57,7 +56,7 @@ import Foundation
 /// and resumes after a cooldown; captions fall back to source meanwhile.
 ///
 /// Single-threaded (main). LLM completions bounce back to main. No locks.
-final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
+final class TranslationEngine {
     /// English name of the target language, used verbatim in the prompt.
     var targetLanguage = "English"
     /// English name of the source language, or "Auto" to let the model detect
@@ -71,10 +70,11 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
     var deeplTargetLang = "KO"
     var deeplSourceLang = ""
 
-    /// When true, sealed utterances are read aloud via system TTS after their
-    /// translation lands. Uses the target language to pick the right voice.
-    var speakTranslations = false
-    private let synthesizer = AVSpeechSynthesizer()
+    /// Fired once per utterance with its translation, the first time one is
+    /// worth speaking: at seal time when a draft exists, else when the
+    /// definitive translation lands. The speech pipeline (SpeechOutput)
+    /// buffers and voices these; the engine only decides WHAT to say.
+    var onSpeakableTranslation: ((String) -> Void)?
 
     /// One styled caption run: `committed` text renders white, else dimmed.
     struct CaptionRun {
@@ -176,19 +176,11 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Lifecycle
 
-    override init() {
-        super.init()
-        synthesizer.delegate = self
-    }
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        speechQueue = max(0, speechQueue - 1)
-    }
-
     /// Session start: forget everything and invalidate any in-flight responses.
     func reset() {
         generation &+= 1
         utterances.removeAll()
+        spokenIDs.removeAll()
         liveRequest = nil
         qualityRequest = nil
         failureStreak = 0
@@ -232,12 +224,13 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
                 }
                 if !utterances[i].sealed {
                     utterances[i].sealed = true
-                    // The moment a line seals with a draft, read it aloud
-                    // immediately — don't wait for the quality pass.
-                    if let text = utterances[i].translation.text { speak(text) }
-                } else {
-                    utterances[i].sealed = true
+                    // The moment a line seals with a draft, hand it to the
+                    // voice immediately — don't wait for the quality pass.
+                    if let text = utterances[i].translation.text {
+                        emitSpeakable(text, id: utterances[i].id)
+                    }
                 }
+                utterances[i].sealed = true
             } else {
                 utterances.append(Utterance(id: mintID(), source: src, sealed: true, translatedSource: nil))
             }
@@ -341,7 +334,7 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
                 utterances[i].translation = .final(text: text)
                 utterances[i].translatedSource = u.source
                 qualityRequest = nil
-                speak(text)
+                emitSpeakable(text, id: u.id)
                 render()
                 schedule()
                 return
@@ -397,7 +390,7 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
             if !text.isEmpty, let i = index(of: req.id), utterances[i].source == req.source {
                 utterances[i].translation = .final(text: text)
                 utterances[i].translatedSource = req.source
-                speak(text)
+                emitSpeakable(text, id: req.id)
             }
         case .failure(let error):
             SpeechService.diag("translate quality FAILED: \(error.localizedDescription)")
@@ -462,45 +455,15 @@ final class TranslationEngine: NSObject, AVSpeechSynthesizerDelegate {
         pausedUntil = .distantPast
     }
 
-    // MARK: - TTS
+    // MARK: - Speech hand-off
 
-    /// Reads a translated utterance aloud. Queues behind the current speech
-    /// so consecutive sentences flow naturally like a simultaneous interpreter.
-    /// If the queue grows too deep (speech falling behind live conversation),
-    /// flushes the backlog and jumps to the latest.
-    private var lastSpoken = ""
-    private var speechQueue = 0
-    private func speak(_ text: String) {
-        guard speakTranslations, !text.isEmpty, text != lastSpoken else { return }
-        lastSpoken = text
-        if speechQueue >= 2 {
-            synthesizer.stopSpeaking(at: .word)
-            speechQueue = 0
-        }
-        speechQueue += 1
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.25
-        utterance.preUtteranceDelay = 0.05
-        utterance.postUtteranceDelay = 0.1
-        // Pick a voice for the target language — DeepL codes and LLM prompt
-        // names both need to map to a BCP 47 language tag.
-        let langTag = Self.ttsLanguageTag(deepl: deeplTargetLang, llm: targetLanguage)
-        utterance.voice = AVSpeechSynthesisVoice(language: langTag)
-        synthesizer.speak(utterance)
-    }
+    /// Utterances already handed to the voice; each speaks exactly once even
+    /// though both the seal hook and the quality pass can produce its text.
+    private var spokenIDs: Set<Int> = []
 
-    private static func ttsLanguageTag(deepl: String, llm: String) -> String {
-        let deeplMap: [String: String] = [
-            "KO": "ko-KR", "JA": "ja-JP", "EN-US": "en-US", "EN-GB": "en-GB",
-            "ZH-HANS": "zh-CN", "ZH-HANT": "zh-TW", "DE": "de-DE",
-            "FR": "fr-FR", "ES": "es-ES", "PT-BR": "pt-BR", "RU": "ru-RU",
-        ]
-        if let tag = deeplMap[deepl] { return tag }
-        let llmMap: [String: String] = [
-            "Korean": "ko-KR", "Japanese": "ja-JP", "English": "en-US",
-            "Simplified Chinese": "zh-CN", "Traditional Chinese": "zh-TW",
-        ]
-        return llmMap[llm] ?? "en-US"
+    private func emitSpeakable(_ text: String, id: Int) {
+        guard !text.isEmpty, spokenIDs.insert(id).inserted else { return }
+        onSpeakableTranslation?(text)
     }
 
     // MARK: - Local agreement

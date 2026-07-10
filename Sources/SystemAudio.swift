@@ -97,6 +97,79 @@ enum SystemAudio {
         diag("input restore -> \(previous) ok=\(ok)")
     }
 
+    // MARK: - Output ducking (for spoken translations)
+
+    /// Device whose volume we ducked, and its pre-duck volume, so restore is
+    /// exact even if the default output changes while speaking.
+    private static var duckedDevice: AudioDeviceID?
+    private static var preDuckVolume: Float?
+
+    /// Lower the default output volume to `factor` × its current value, so a
+    /// spoken translation (played at boosted gain through the app's own audio
+    /// engine) sits on top of the quieted original — like a real interpreter
+    /// feed. Safe to call repeatedly; only the first call samples the volume.
+    static func duckOutput(to factor: Float) {
+        guard duckedDevice == nil, let device = defaultOutputDeviceID(),
+              let volume = outputVolume(device) else { return }
+        duckedDevice = device
+        preDuckVolume = volume
+        setOutputVolume(device, volume * factor)
+        diag("ducked output \(volume) -> \(volume * factor)")
+    }
+
+    /// Restore the volume we ducked. No-op unless duckOutput ran.
+    static func unduckOutput() {
+        guard let device = duckedDevice, let volume = preDuckVolume else { return }
+        duckedDevice = nil
+        preDuckVolume = nil
+        setOutputVolume(device, volume)
+        diag("unducked output -> \(volume)")
+    }
+
+    /// Reads the device's output volume scalar. Tries the main element first;
+    /// many devices only expose per-channel (1/2) volume, so fall back to the
+    /// average of the channels.
+    private static func outputVolume(_ device: AudioDeviceID) -> Float? {
+        if let v = volumeScalar(device, element: kAudioObjectPropertyElementMain) { return v }
+        let channels = [1, 2].compactMap { volumeScalar(device, element: AudioObjectPropertyElement($0)) }
+        guard !channels.isEmpty else { return nil }
+        return channels.reduce(0, +) / Float(channels.count)
+    }
+
+    private static func setOutputVolume(_ device: AudioDeviceID, _ value: Float) {
+        let clamped = max(0, min(1, value))
+        if setVolumeScalar(device, element: kAudioObjectPropertyElementMain, clamped) { return }
+        for channel in [1, 2] {
+            _ = setVolumeScalar(device, element: AudioObjectPropertyElement(channel), clamped)
+        }
+    }
+
+    private static func volumeAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: element
+        )
+    }
+
+    private static func volumeScalar(_ device: AudioDeviceID, element: AudioObjectPropertyElement) -> Float? {
+        var address = volumeAddress(element)
+        guard AudioObjectHasProperty(device, &address) else { return nil }
+        var value: Float = 0
+        var size = UInt32(MemoryLayout<Float>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value
+    }
+
+    @discardableResult
+    private static func setVolumeScalar(_ device: AudioDeviceID, element: AudioObjectPropertyElement, _ value: Float) -> Bool {
+        var address = volumeAddress(element)
+        guard AudioObjectHasProperty(device, &address) else { return false }
+        var v = value
+        let size = UInt32(MemoryLayout<Float>.size)
+        return AudioObjectSetPropertyData(device, &address, 0, nil, size, &v) == noErr
+    }
+
     // MARK: - CoreAudio plumbing
 
     private static func defaultOutputDeviceID() -> AudioDeviceID? {
