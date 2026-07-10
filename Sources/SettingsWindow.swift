@@ -45,7 +45,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // DeepL
     private let deeplEnabledCheck = NSButton(checkboxWithTitle: "Use DeepL for Live Translation (instead of Engine)", target: nil, action: nil)
-    private let deeplKeyField = NSSecureTextField()
+    private let deeplKeyField = NSTextField()
     private let deeplSourcePopup = NSPopUpButton()
     private let deeplTargetPopup = NSPopUpButton()
     private let deeplStatusLabel = NSTextField(labelWithString: "")
