@@ -48,6 +48,19 @@ final class DeepLVoiceSession: NSObject {
     /// Pending PCM bytes; sent when ~200 ms (6400 bytes) accumulate.
     private var pendingAudio = Data()
     private let chunkBytes = 6400
+    /// 16 kHz × 2 bytes: one second of pending audio.
+    private let bytesPerSecond = 32_000
+    /// Live interpretation must stay LIVE: when sending falls behind (socket
+    /// handshake, network stall), everything older than this is dropped —
+    /// translating the past while the present talks is worse than a gap.
+    private var maxPendingBytes: Int { bytesPerSecond * 3 }
+    /// Chunk pacing per the protocol (next send ≥ half the previous chunk's
+    /// duration later) — catching up runs at 2× real time, never a burst.
+    private var nextSendAt = Date.distantPast
+    private var drainScheduled = false
+    /// Keepalive: the server kills sessions idle for 30 s, and a paused
+    /// video on the system-audio source stops the capture callbacks cold.
+    private var lastChunkSentAt = Date()
 
     // Transcript accumulation (concluded is append-only per the protocol).
     private var sourceConcluded = ""
@@ -153,12 +166,46 @@ final class DeepLVoiceSession: NSObject {
         ws.resume()
         SpeechService.diag("deepl voice connected \(sourceLang.isEmpty ? "auto" : sourceLang)->\(targetLang)")
         receiveLoop()
+        keepaliveLoop()
+        drainPending() // flush the few seconds captured during the handshake
+    }
+
+    /// Verifies an API key against the VOICE endpoint — one REST round-trip
+    /// checks the key, the paid plan, and Voice access together. Used by the
+    /// settings Test button.
+    static func testConnection(apiKey: String, completion: @escaping (Result<String, Error>) -> Void) {
+        struct TestError: LocalizedError {
+            let message: String
+            var errorDescription: String? { message }
+        }
+        var req = URLRequest(url: URL(string: "https://api.deepl.com/v3/voice/realtime")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        req.setValue("DeepL-Auth-Key \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "source_media_content_type": "audio/pcm;encoding=s16le;rate=16000",
+            "target_languages": ["ko"],
+        ])
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            if let error { completion(.failure(error)); return }
+            guard let data, let http = response as? HTTPURLResponse else {
+                completion(.failure(TestError(message: "no response")))
+                return
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                completion(.failure(TestError(message: "HTTP \(http.statusCode): \(String(data: data, encoding: .utf8) ?? "")")))
+                return
+            }
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            completion(.success(json?["session_id"] as? String ?? "ok"))
+        }.resume()
     }
 
     // MARK: - Sending
 
     private func convertAndSend(_ buffer: AVAudioPCMBuffer) {
-        guard !closed, webSocket != nil else { return }
+        guard !closed else { return }
         if converter == nil || converterInputFormat != buffer.format {
             converter = AVAudioConverter(from: buffer.format, to: targetFormat)
             converterInputFormat = buffer.format
@@ -179,10 +226,60 @@ final class DeepLVoiceSession: NSObject {
               let channel = out.int16ChannelData else { return }
         pendingAudio.append(Data(bytes: channel[0], count: Int(out.frameLength) * 2))
 
-        while pendingAudio.count >= chunkBytes {
-            let chunk = pendingAudio.prefix(chunkBytes)
-            pendingAudio.removeFirst(chunkBytes)
-            sendJSON(["source_media_chunk": ["data": chunk.base64EncodedString()]])
+        // Keep only the newest few seconds: audio held back by the socket
+        // handshake or a network stall is stale interpretation — drop it.
+        if pendingAudio.count > maxPendingBytes {
+            pendingAudio.removeFirst(pendingAudio.count - maxPendingBytes)
+        }
+        drainPending()
+    }
+
+    /// Sends pending audio respecting the protocol's pacing rule: chunks of
+    /// at most one second, the next no sooner than half the previous chunk's
+    /// duration — a backlog drains at 2× real time instead of a burst the
+    /// server would reject.
+    private func drainPending() {
+        guard !closed, webSocket != nil else { return }
+        let now = Date()
+        if now < nextSendAt {
+            scheduleDrain(after: nextSendAt.timeIntervalSince(now))
+            return
+        }
+        guard pendingAudio.count >= chunkBytes else { return }
+        let size = min(pendingAudio.count, bytesPerSecond)
+        let chunk = pendingAudio.prefix(size)
+        pendingAudio.removeFirst(size)
+        sendJSON(["source_media_chunk": ["data": chunk.base64EncodedString()]])
+        lastChunkSentAt = now
+        let duration = Double(size) / Double(bytesPerSecond)
+        nextSendAt = now.addingTimeInterval(duration / 2)
+        if pendingAudio.count >= chunkBytes {
+            scheduleDrain(after: duration / 2)
+        }
+    }
+
+    private func scheduleDrain(after delay: TimeInterval) {
+        guard !drainScheduled else { return }
+        drainScheduled = true
+        queue.asyncAfter(deadline: .now() + max(0.02, delay)) { [weak self] in
+            self?.drainScheduled = false
+            self?.drainPending()
+        }
+    }
+
+    /// The server times out sessions with no audio for 30 s. The system-audio
+    /// source stops delivering buffers entirely when nothing plays (paused
+    /// video, silence between meetings) — feed zeros so the session survives
+    /// the lull and picks up instantly when sound returns.
+    private func keepaliveLoop() {
+        queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, !self.closed else { return }
+            if Date().timeIntervalSince(self.lastChunkSentAt) > 8, self.webSocket != nil {
+                let silence = Data(count: self.chunkBytes) // 200 ms of s16le zeros
+                self.sendJSON(["source_media_chunk": ["data": silence.base64EncodedString()]])
+                self.lastChunkSentAt = Date()
+            }
+            self.keepaliveLoop()
         }
     }
 

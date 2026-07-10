@@ -38,8 +38,9 @@ final class SpeechOutput {
     private let duckFactor: Float = 0.5
     private let voiceBoost: Float = 1.8
 
-    /// Default system speech rate (user-tuned; boosts read as rushed).
-    private let rate = AVSpeechUtteranceDefaultSpeechRate
+    /// 10% above the system default (user-tuned: default read as sluggish,
+    /// +25% as rushed).
+    private let rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
 
     /// How long an idle voice waits for more shards before speaking an
     /// unterminated fragment. A slow speaker produces small shards with real

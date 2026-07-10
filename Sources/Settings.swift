@@ -203,9 +203,47 @@ final class Settings {
 
     // MARK: - DeepL
 
-    var deeplEnabled: Bool {
-        get { defaults.bool(forKey: Keys.deeplEnabled) }
-        set { defaults.set(newValue, forKey: Keys.deeplEnabled) }
+    /// Which engine drives live translation: "llm" (the Engine LLM),
+    /// "deepl" (DeepL text API), or "deepl-voice" (DeepL Voice streaming).
+    /// Selected in Settings ▸ Engine ▸ Translation.
+    var translationProvider: String {
+        get {
+            // DeepL always means Voice streaming now — the text-request DeepL
+            // path fed fragments from the local recognizer and inherited all
+            // its problems; "deepl" migrates forward.
+            if let v = defaults.string(forKey: "translationProvider") {
+                return v == "deepl" ? "deepl-voice" : v
+            }
+            // Migrate from the old two-checkbox scheme.
+            if defaults.bool(forKey: "deeplVoiceEnabled") || defaults.bool(forKey: Keys.deeplEnabled) {
+                return "deepl-voice"
+            }
+            return "llm"
+        }
+        set { defaults.set(newValue, forKey: "translationProvider") }
+    }
+
+    /// Bridges kept so call sites read naturally.
+    var deeplEnabled: Bool { translationProvider.hasPrefix("deepl") }
+    var deeplVoiceEnabled: Bool { translationProvider == "deepl-voice" }
+
+    /// Model for LLM-based translation, selectable apart from the Meeting
+    /// engine's model. Defaults to the Meeting model until set.
+    var translationLLMModel: String {
+        get { defaults.string(forKey: "translationLLMModel") ?? llmModel }
+        set { defaults.set(newValue, forKey: "translationLLMModel") }
+    }
+
+    /// Audio source for translation (interpreter) sessions, separate from
+    /// meeting recordings. Follows the meeting source until explicitly set.
+    var translationAudioSourceIsSystem: Bool {
+        get {
+            guard let v = defaults.string(forKey: "translationAudioSource") else {
+                return lockedAudioSourceIsSystem
+            }
+            return v == "system"
+        }
+        set { defaults.set(newValue ? "system" : "mic", forKey: "translationAudioSource") }
     }
 
     var deeplAPIKey: String {
@@ -237,15 +275,6 @@ final class Settings {
 
     var deeplConfigured: Bool {
         !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    /// DeepL Voice streaming: audio goes straight to DeepL (its own ASR +
-    /// segmentation + translation) instead of local transcription feeding
-    /// text requests. Fixes utterance-ending loss and fragment translation
-    /// at the root.
-    var deeplVoiceEnabled: Bool {
-        get { defaults.bool(forKey: "deeplVoiceEnabled") }
-        set { defaults.set(newValue, forKey: "deeplVoiceEnabled") }
     }
 
     /// Where locked (long-form) sessions capture audio from: the microphone,

@@ -74,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = Settings.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.migrateFlatLayout()
         setupStatusItem()
         requestPermissionsAndStart()
         wireSpeech()
@@ -447,13 +448,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startLockedRecording() {
         guard !isLockedRecording else { return }
-        // The Live Translation toggle decides what this session is for.
-        // DeepL is a separate translation path — it doesn't need the Engine.
-        // Either the LLM Live Translation toggle + Engine, or DeepL enabled
-        // + API key, makes the session an interpreter session.
-        let deeplReady = settings.deeplEnabled && settings.deeplConfigured
-        let llmReady = settings.liveTranslationEnabled && settings.llmConfigured
-        let mode: LockMode = (deeplReady || llmReady) ? .interpreter : .meeting
+        // The Live Translation toggle is the master switch; the Engine tab's
+        // Translation provider decides who does the work and what "ready"
+        // means (DeepL: its API key; LLM: the Meeting account).
+        let translationReady = settings.liveTranslationEnabled &&
+            (settings.deeplEnabled ? settings.deeplConfigured : settings.llmConfigured)
+        let mode: LockMode = translationReady ? .interpreter : .meeting
         // Clear any streaming-mode residue from the previous session; the
         // voice branch below re-arms it when applicable.
         longForm.bypassAnalyzer = false
@@ -498,7 +498,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // utterance scrolls it or its own delayed translation lands.
         subtitles.maxLines = mode == .interpreter ? 3 : 2
         subtitles.fadeWhenIdle = mode != .interpreter
-        longForm.audioSource = settings.lockedAudioSourceIsSystem ? .systemAudio : .microphone
+        // Translation sessions have their own audio-source setting (a call
+        // being interpreted usually plays through the system; a meeting is
+        // usually the room mic).
+        let useSystemAudio = mode == .interpreter
+            ? settings.translationAudioSourceIsSystem
+            : settings.lockedAudioSourceIsSystem
+        longForm.audioSource = useSystemAudio ? .systemAudio : .microphone
         NSLog("MacTranscribe[App]: locked recording started mode=\(mode)")
         // Tear down the short push-to-talk session left over from the
         // double-tap's first tap; the locked session uses the long-form engine.
@@ -520,10 +526,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a crash can silently lose the recording.
         let stamp = Self.fileTimestamp()
         lockSessionStamp = stamp
-        let dir = Self.transcriptsDirectory
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        longForm.audioBackupURL = dir.appendingPathComponent("recording-\(stamp).m4a")
-        lockAutosaveURL = dir.appendingPathComponent(".inprogress-\(stamp).txt")
+        try? FileManager.default.createDirectory(at: Self.recordingsDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: Self.transcriptsDirectory, withIntermediateDirectories: true)
+        longForm.audioBackupURL = Self.recordingsDirectory.appendingPathComponent("recording-\(stamp).m4a")
+        lockAutosaveURL = Self.transcriptsDirectory.appendingPathComponent(".inprogress-\(stamp).txt")
         lastAutosaveAt = .distantPast
         sleepActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleSystemSleepDisabled, .userInitiated],
@@ -716,6 +722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         session.onTargetTranscript = { [weak self] concluded, tentative in
             guard let self, self.voiceSession === session else { return }
+            // Receiving translations proves the connection is healthy —
+            // reset the reconnect budget so only CONSECUTIVE failures spend it.
+            self.voiceRestarts = 0
             self.voiceTargetFull = self.voiceTargetBase + concluded
             self.transcriptWindow.updateTranscript(self.voiceTargetFull + tentative)
             self.subtitles.update(pieces: Self.voiceCaptionPieces(
@@ -752,7 +761,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voiceRestarts += 1
         NSLog("MacTranscribe[App]: voice session error (\(message)); reconnect #\(voiceRestarts)")
         transcriptWindow.setStatus("Voice reconnecting (\(voiceRestarts))…")
-        startVoiceSession()
+        // Brief backoff so a hard outage doesn't burn the budget instantly;
+        // stale audio accumulated meanwhile is dropped by the session itself.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, self.isLockedRecording, self.longForm.bypassAnalyzer else { return }
+            self.startVoiceSession()
+        }
     }
 
     /// Caption pieces for streaming mode: the last couple of concluded
@@ -782,9 +796,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Locked session persistence
 
-    static var transcriptsDirectory: URL {
+    /// ~/Documents/MacTranscribe — with transcripts, recordings, and notes
+    /// in their own subfolders so a month of sessions stays browsable.
+    static var baseDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MacTranscribe", isDirectory: true)
+    }
+    static var transcriptsDirectory: URL { baseDirectory.appendingPathComponent("transcripts", isDirectory: true) }
+    static var recordingsDirectory: URL { baseDirectory.appendingPathComponent("recordings", isDirectory: true) }
+    static var notesDirectory: URL { baseDirectory.appendingPathComponent("notes", isDirectory: true) }
+
+    /// One-time move of pre-split files from the flat layout into the
+    /// subfolders. Runs at launch; already-moved files are untouched.
+    static func migrateFlatLayout() {
+        let fm = FileManager.default
+        for dir in [transcriptsDirectory, recordingsDirectory, notesDirectory] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        guard let entries = try? fm.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) else { return }
+        for url in entries {
+            let name = url.lastPathComponent
+            let destDir: URL?
+            if name.hasPrefix("transcript-") || name.hasPrefix(".inprogress-") {
+                destDir = transcriptsDirectory
+            } else if name.hasPrefix("recording-") {
+                destDir = recordingsDirectory
+            } else if name.hasPrefix("notes-") {
+                destDir = notesDirectory
+            } else {
+                destDir = nil
+            }
+            if let destDir {
+                try? fm.moveItem(at: url, to: destDir.appendingPathComponent(name))
+            }
+        }
     }
 
     private static func fileTimestamp() -> String {
@@ -822,7 +867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Generates structured meeting notes from the raw transcript via the LLM
     /// (glossary included in the prompt) and saves them as notes-<stamp>.md.
     /// Failures only log — the transcript file is already safe on disk.
-    private func generateMeetingNotes(from transcript: String, stamp: String, in dir: URL) {
+    private func generateMeetingNotes(from transcript: String, stamp: String) {
         beginPostRecordingTask()
         NSLog("MacTranscribe[App]: generating meeting notes chars=\(transcript.count)")
         SpeechService.diag("meeting notes generating chars=\(transcript.count)")
@@ -838,7 +883,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch result {
                 case .success(let notes):
-                    let url = dir.appendingPathComponent("notes-\(stamp).md")
+                    try? FileManager.default.createDirectory(at: Self.notesDirectory, withIntermediateDirectories: true)
+                    let url = Self.notesDirectory.appendingPathComponent("notes-\(stamp).md")
                     do {
                         try notes.write(to: url, atomically: true, encoding: .utf8)
                         NSLog("MacTranscribe[App]: meeting notes saved chars=\(notes.count)")
@@ -975,7 +1021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ? LLMRefiner.isClaudeAvailable()
                     : settings.llmConfigured
                 if settings.meetingNotesEnabled && notesReady && lockMode == .meeting {
-                    generateMeetingNotes(from: final, stamp: stamp, in: dir)
+                    generateMeetingNotes(from: final, stamp: stamp)
                 }
             } catch {
                 NSLog("MacTranscribe[App]: failed to save transcript: \(error)")
@@ -984,7 +1030,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let autosaveURL { try? FileManager.default.removeItem(at: autosaveURL) }
-        let audioURL = dir.appendingPathComponent("recording-\(stamp).m4a")
+        let audioURL = Self.recordingsDirectory.appendingPathComponent("recording-\(stamp).m4a")
         let hadVoice = longForm.sessionPeakLevel >= 0.02
         if hadVoice {
             // Speech happened but transcription produced nothing usable: keep
@@ -1027,7 +1073,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSavedFolder() {
-        let dir = Self.transcriptsDirectory
+        let dir = Self.baseDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
     }

@@ -246,12 +246,18 @@ final class LongFormTranscriber {
     /// When capture actually started delivering buffers (.distantFuture
     /// until then, so the watchdog can't fire during model download).
     private var audioStartedAt = Date.distantFuture
-    /// When the recognizer produced its first result (volatile or final).
-    private var firstResultAt: Date?
+    /// When the recognizer last produced ANY result (volatile or final).
+    /// nil until the first one. The watchdog compares against this, so it
+    /// catches both a pipeline that comes up mute AND one that dies
+    /// mid-session (audio still flowing, results stopped — the "worked fine,
+    /// then froze after a pause" failure).
+    private var lastResultAt: Date?
     private var pipelineRestarts = 0
     private var pipelineRestartInFlight = false
-    /// Audio flowing this long with zero results means the pipeline is mute.
+    /// Voice heard for this long with zero results means the pipeline is dead.
     private let mutePipelineTimeout: TimeInterval = 12
+    /// Give up after this many consecutive rebuilds (a result resets it).
+    private let maxPipelineRestarts = 3
 
     private func markAudioStarted() {
         stateLock.lock()
@@ -261,8 +267,11 @@ final class LongFormTranscriber {
 
     private func noteFirstResult() {
         stateLock.lock()
-        let isFirst = firstResultAt == nil
-        if isFirst { firstResultAt = Date() }
+        let isFirst = lastResultAt == nil
+        lastResultAt = Date()
+        // Any result proves the pipeline is alive — only CONSECUTIVE dead
+        // rebuilds should spend the restart budget.
+        pipelineRestarts = 0
         let elapsed = audioStartedAt.timeIntervalSinceNow * -1
         stateLock.unlock()
         if isFirst, elapsed.isFinite, elapsed > 0 {
@@ -271,20 +280,24 @@ final class LongFormTranscriber {
     }
 
     /// Called from the audio thread on every buffer (cheap checks first).
+    /// Fires when the speaker is audibly talking (voiceActive) but the
+    /// recognizer hasn't produced anything for mutePipelineTimeout — whether
+    /// it never started (mute at birth) or died mid-session after a silence.
     private func maybeRestartMutePipeline(now: Date) {
+        guard voiceActive else { return }
         stateLock.lock()
+        let quietSince = lastResultAt ?? audioStartedAt
         let shouldRestart = isRunning && !pipelineRestartInFlight
-            && firstResultAt == nil
-            && pipelineRestarts < 2
+            && pipelineRestarts < maxPipelineRestarts
             && sessionPeakLevel > 0.1
-            && now.timeIntervalSince(audioStartedAt) > mutePipelineTimeout
+            && now.timeIntervalSince(quietSince) > mutePipelineTimeout
         if shouldRestart {
             pipelineRestartInFlight = true
             pipelineRestarts += 1
         }
         stateLock.unlock()
         guard shouldRestart else { return }
-        SpeechService.diag("longform watchdog: audio flowing but no results in \(Int(mutePipelineTimeout))s — rebuilding analyzer")
+        SpeechService.diag("longform watchdog: voice heard but no results in \(Int(mutePipelineTimeout))s — rebuilding analyzer")
         DispatchQueue.main.async { [weak self] in
             self?.onStatus?("Recognition stalled — restarting…")
             self?.rebuildMutePipeline()
@@ -335,7 +348,7 @@ final class LongFormTranscriber {
         sessionPeakLevel = 0
         sessionLanguage = language
         audioStartedAt = .distantFuture
-        firstResultAt = nil
+        lastResultAt = nil
         pipelineRestarts = 0
         pipelineRestartInFlight = false
         stateLock.unlock()

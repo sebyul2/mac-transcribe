@@ -255,7 +255,7 @@ enum LLMRefiner {
             text: text,
             baseURL: settings.llmBaseURL,
             apiKey: settings.llmAPIKey,
-            model: settings.llmModel,
+            model: settings.translationLLMModel, // translation has its own model pick
             proto: settings.llmProtocol,
             systemPrompt: prompt,
             reasoningEffort: effort,
