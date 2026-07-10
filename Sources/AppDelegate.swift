@@ -427,11 +427,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startLockedRecording() {
         guard !isLockedRecording else { return }
         // The Live Translation toggle decides what this session is for.
-        let mode: LockMode = (settings.liveTranslationEnabled && settings.llmConfigured)
-            ? .interpreter : .meeting
+        // DeepL is a separate translation path — it doesn't need the Engine.
+        // Either the LLM Live Translation toggle + Engine, or DeepL enabled
+        // + API key, makes the session an interpreter session.
+        let deeplReady = settings.deeplEnabled && settings.deeplConfigured
+        let llmReady = settings.liveTranslationEnabled && settings.llmConfigured
+        let mode: LockMode = (deeplReady || llmReady) ? .interpreter : .meeting
         lockMode = mode
         if mode == .interpreter {
             translator.reset()
+            translator.speakTranslations = settings.speakTranslations
             if settings.deeplEnabled && settings.deeplConfigured {
                 translator.useDeepL = true
                 translator.deeplAPIKey = settings.deeplAPIKey

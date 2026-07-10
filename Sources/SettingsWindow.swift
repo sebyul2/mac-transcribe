@@ -48,6 +48,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let deeplKeyField = NSTextField()
     private let deeplSourcePopup = NSPopUpButton()
     private let deeplTargetPopup = NSPopUpButton()
+    private let deeplSpeakCheck = NSButton(checkboxWithTitle: "Read translations aloud (TTS)", target: nil, action: nil)
     private let deeplStatusLabel = NSTextField(labelWithString: "")
 
     // Engine (LLM)
@@ -286,23 +287,43 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         place(deeplTargetPopup, x: fieldX, top: 162, w: fieldW, in: view)
 
+        deeplSpeakCheck.target = self
+        deeplSpeakCheck.action = #selector(deeplSpeakChanged)
+        place(deeplSpeakCheck, x: 20, top: 200, w: 440, h: 20, in: view)
+
+        let mutualNote = NSTextField(wrappingLabelWithString:
+            "DeepL을 켜면 Translation 탭의 LLM 번역은 자동으로 비활성됩니다. "
+            + "용어집(Glossary)은 Engine 탭에서 첨부할 수 있으며 LLM 회의록·보정에 반영됩니다.")
+        mutualNote.font = .systemFont(ofSize: 11); mutualNote.textColor = .secondaryLabelColor
+        place(mutualNote, x: 20, top: 224, w: 440, h: 32, in: view)
+
         deeplStatusLabel.alignment = .left
         deeplStatusLabel.maximumNumberOfLines = 2
         deeplStatusLabel.lineBreakMode = .byWordWrapping
         deeplStatusLabel.textColor = .secondaryLabelColor
-        place(deeplStatusLabel, x: 20, top: 210, w: 440, h: 40, in: view)
+        place(deeplStatusLabel, x: 20, top: 268, w: 440, h: 40, in: view)
 
         let testButton = NSButton(title: "Test", target: self, action: #selector(deeplTestTapped))
         testButton.bezelStyle = .rounded
-        place(testButton, x: 260, top: 266, w: 90, h: 32, in: view)
+        place(testButton, x: 260, top: 318, w: 90, h: 32, in: view)
         let saveButton = NSButton(title: "Save", target: self, action: #selector(deeplSaveTapped))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
-        place(saveButton, x: 360, top: 266, w: 100, h: 32, in: view)
+        place(saveButton, x: 360, top: 318, w: 100, h: 32, in: view)
     }
 
     @objc private func deeplEnabledChanged() {
-        Settings.shared.deeplEnabled = deeplEnabledCheck.state == .on
+        let on = deeplEnabledCheck.state == .on
+        Settings.shared.deeplEnabled = on
+        if on {
+            Settings.shared.liveTranslationEnabled = false
+            liveTranslationCheck.state = .off
+        }
+        onSettingsChanged?()
+    }
+
+    @objc private func deeplSpeakChanged() {
+        Settings.shared.speakTranslations = deeplSpeakCheck.state == .on
         onSettingsChanged?()
     }
 
@@ -439,6 +460,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         deeplKeyField.stringValue = s.deeplAPIKey
         selectByRepresented(deeplSourcePopup, s.deeplSourceLang)
         selectByRepresented(deeplTargetPopup, s.deeplTargetLang)
+        deeplSpeakCheck.state = s.speakTranslations ? .on : .off
 
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off
@@ -525,9 +547,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Translation actions
 
     @objc private func liveTranslationChanged() {
-        Settings.shared.liveTranslationEnabled = liveTranslationCheck.state == .on
-        // Translation needs the Engine; nudge the user there if it's not ready.
-        if Settings.shared.liveTranslationEnabled && !Settings.shared.llmConfigured {
+        let on = liveTranslationCheck.state == .on
+        Settings.shared.liveTranslationEnabled = on
+        if on {
+            Settings.shared.deeplEnabled = false
+            deeplEnabledCheck.state = .off
+        }
+        if on && !Settings.shared.llmConfigured {
             selectTab("Engine")
         }
         onSettingsChanged?()

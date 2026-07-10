@@ -223,6 +223,11 @@ final class Settings {
         set { defaults.set(newValue, forKey: Keys.deeplSourceLang) }
     }
 
+    var speakTranslations: Bool {
+        get { defaults.bool(forKey: "speakTranslations") }
+        set { defaults.set(newValue, forKey: "speakTranslations") }
+    }
+
     var deeplConfigured: Bool {
         !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
     }

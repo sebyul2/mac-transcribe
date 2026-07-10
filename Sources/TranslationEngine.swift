@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Live translation for locked (interpreter) sessions.
@@ -69,6 +70,11 @@ final class TranslationEngine {
     var deeplAPIKey = ""
     var deeplTargetLang = "KO"
     var deeplSourceLang = ""
+
+    /// When true, sealed utterances are read aloud via system TTS after their
+    /// translation lands. Uses the target language to pick the right voice.
+    var speakTranslations = false
+    private let synthesizer = AVSpeechSynthesizer()
 
     /// One styled caption run: `committed` text renders white, else dimmed.
     struct CaptionRun {
@@ -284,6 +290,7 @@ final class TranslationEngine {
         liveRequest = Request(id: u.id, source: u.source)
         let gen = generation
         if useDeepL {
+            SpeechService.diag("deepl live -> \(deeplTargetLang) chars=\(u.source.count)")
             DeepLTranslator.translate(u.source, targetLang: deeplTargetLang,
                                        sourceLang: deeplSourceLang.isEmpty ? nil : deeplSourceLang,
                                        apiKey: deeplAPIKey) { [weak self] result in
@@ -318,6 +325,7 @@ final class TranslationEngine {
                 utterances[i].translation = .final(text: text)
                 utterances[i].translatedSource = u.source
                 qualityRequest = nil
+                speak(text)
                 render()
                 schedule()
                 return
@@ -373,6 +381,7 @@ final class TranslationEngine {
             if !text.isEmpty, let i = index(of: req.id), utterances[i].source == req.source {
                 utterances[i].translation = .final(text: text)
                 utterances[i].translatedSource = req.source
+                speak(text)
             }
         case .failure(let error):
             SpeechService.diag("translate quality FAILED: \(error.localizedDescription)")
@@ -435,6 +444,37 @@ final class TranslationEngine {
     private func noteSuccess() {
         failureStreak = 0
         pausedUntil = .distantPast
+    }
+
+    // MARK: - TTS
+
+    /// Reads a translated utterance aloud. Skips if TTS is off, or if the
+    /// synthesizer is already speaking (so utterances don't queue up and play
+    /// minutes behind). Uses the target language to pick the voice.
+    private func speak(_ text: String) {
+        guard speakTranslations, !text.isEmpty else { return }
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .word) }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+        // Pick a voice for the target language — DeepL codes and LLM prompt
+        // names both need to map to a BCP 47 language tag.
+        let langTag = Self.ttsLanguageTag(deepl: deeplTargetLang, llm: targetLanguage)
+        utterance.voice = AVSpeechSynthesisVoice(language: langTag)
+        synthesizer.speak(utterance)
+    }
+
+    private static func ttsLanguageTag(deepl: String, llm: String) -> String {
+        let deeplMap: [String: String] = [
+            "KO": "ko-KR", "JA": "ja-JP", "EN-US": "en-US", "EN-GB": "en-GB",
+            "ZH-HANS": "zh-CN", "ZH-HANT": "zh-TW", "DE": "de-DE",
+            "FR": "fr-FR", "ES": "es-ES", "PT-BR": "pt-BR", "RU": "ru-RU",
+        ]
+        if let tag = deeplMap[deepl] { return tag }
+        let llmMap: [String: String] = [
+            "Korean": "ko-KR", "Japanese": "ja-JP", "English": "en-US",
+            "Simplified Chinese": "zh-CN", "Traditional Chinese": "zh-TW",
+        ]
+        return llmMap[llm] ?? "en-US"
     }
 
     // MARK: - Local agreement
