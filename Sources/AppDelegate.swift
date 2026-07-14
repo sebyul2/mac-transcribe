@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let translator = TranslationEngine()
     /// Voices translated utterances (continuous TTS with optional ducking).
     private let speechOutput = SpeechOutput()
+    /// Decides when streamed translations are settled enough to speak —
+    /// including ahead of DeepL's conclusion (see SpeechGate).
+    private let speechGate = SpeechGate()
     /// On-device translation backend (Apple Translation framework).
     private let appleTranslator = AppleTranslator()
 
@@ -26,8 +29,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Latest full transcripts (base + current session), for save/display.
     private var voiceSourceFull = ""
     private var voiceTargetFull = ""
-    /// How much of the target transcript has been handed to TTS.
-    private var voiceSpokenLength = 0
     private var voiceRestarts = 0
 
     /// What a locked session is for: a meeting capture (transcript + optional
@@ -322,6 +323,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         translator.onSpeakableTranslation = { [weak self] text in
             self?.speechOutput.enqueue(text)
         }
+        speechGate.speak = { [weak self] text in
+            self?.speechOutput.enqueue(text)
+        }
         longForm.onFinished = { [weak self] text in self?.handleLockedFinished(text) }
         longForm.onStatus = { [weak self] status in
             self?.transcriptWindow.setStatus(status)
@@ -491,6 +495,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speechOutput.languageTag = SpeechOutput.languageTag(
                 deepl: settings.deeplEnabled ? settings.deeplTargetLang : "",
                 llm: settings.interpreterTargetLanguage)
+            speechOutput.voiceIdentifier = settings.speechVoiceIdentifier
+            // Premium voices load their model on first synthesis; pay that
+            // during session prep, not on the first translation.
+            speechOutput.prewarm()
             translator.appleTranslator = nil
             if settings.appleTranslationEnabled {
                 // On-device path: by construction NO network request is made
@@ -513,7 +521,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // problems apply.
                 voiceSourceBase = ""; voiceTargetBase = ""
                 voiceSourceFull = ""; voiceTargetFull = ""
-                voiceSpokenLength = 0; voiceRestarts = 0
+                voiceRestarts = 0
+                speechGate.reset()
+                speechGate.earlySpeech = settings.earlySpeechEnabled
                 longForm.bypassAnalyzer = true
                 startVoiceSession()
             } else if settings.deeplEnabled && settings.deeplConfigured {
@@ -769,12 +779,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.transcriptWindow.updateTranscript(self.voiceTargetFull + tentative)
             self.subtitles.update(pieces: Self.voiceCaptionPieces(
                 concluded: self.voiceTargetFull, tentative: tentative))
-            // Speak newly concluded text; concluded is append-only so the
-            // delta is safe, and the length survives reconnects via the base.
-            if self.voiceTargetFull.count > self.voiceSpokenLength {
-                self.speechOutput.enqueue(String(self.voiceTargetFull.dropFirst(self.voiceSpokenLength)))
-                self.voiceSpokenLength = self.voiceTargetFull.count
-            }
+            // The gate decides what is settled enough to speak — concluded
+            // text always, plus stable tentative sentences ahead of their
+            // conclusion. The concluded stream survives reconnects via the
+            // base, so its char counts never go stale.
+            self.speechGate.update(concludedStream: self.voiceTargetFull, tentative: tentative)
         }
         session.onError = { [weak self] message in
             self?.handleVoiceError(message, from: session)
@@ -817,6 +826,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fold the dead session's text into the base and reconnect.
         voiceSourceBase = voiceSourceFull.isEmpty ? "" : voiceSourceFull + "\n"
         voiceTargetBase = voiceTargetFull.isEmpty ? "" : voiceTargetFull + "\n"
+        // The dead session's tentative text will never conclude; write off
+        // anything spoken ahead of it. Concluded accounting stays valid —
+        // the base folding above keeps that stream append-only.
+        speechGate.tentativeInvalidated()
         guard voiceRestarts < 5 else {
             transcriptWindow.setStatus("Voice session lost (\(message)) — recording continues, translation stopped")
             subtitles.flashStatus("⚠️ 통역 연결 끊김 — 녹음은 계속됩니다")

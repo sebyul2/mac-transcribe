@@ -27,7 +27,14 @@ final class SpeechOutput {
     /// Duck the system output while speaking; restore when the voice idles.
     var duckOthers = false
     /// BCP 47 tag choosing the voice, e.g. "ko-KR".
-    var languageTag = "ko-KR"
+    var languageTag = "ko-KR" {
+        didSet { if languageTag != oldValue { cachedVoice = nil } }
+    }
+    /// Specific voice to use; empty picks the highest-quality installed
+    /// voice for `languageTag` automatically.
+    var voiceIdentifier = "" {
+        didSet { if voiceIdentifier != oldValue { cachedVoice = nil } }
+    }
 
     /// System volume multiplier while ducked. The engine's own output ALSO
     /// passes through the ducked system volume, so the voice is compensated
@@ -39,28 +46,53 @@ final class SpeechOutput {
     private let duckFactor: Float = 0.35
     private let voiceBoost: Float = 2.4
 
-    /// 10% above the system default (user-tuned: default read as sluggish,
-    /// +25% as rushed).
-    private let rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+    /// Base speech rate: 10% above the system default (user-tuned: default
+    /// read as sluggish, +25% as rushed). When text backs up behind a busy
+    /// voice the rate scales up to `maxRateMultiplier` so the voice catches
+    /// the conversation instead of drifting ever further behind — and falls
+    /// straight back once the backlog clears (re-evaluated every utterance).
+    private let baseRateMultiplier: Double = 1.1
+    private let maxRateMultiplier: Double = 1.35
+    /// Backlog (chars) where the rate starts climbing / tops out.
+    private let rateRampStart = 40
+    private let rateRampEnd = 240
 
     /// How long an idle voice waits for more shards before speaking an
     /// unterminated fragment. A slow speaker produces small shards with real
     /// pauses between them; reading each one the moment it arrives yields
     /// "two words — silence — two words". Waiting a beat merges them into a
     /// phrase, while sentence-final punctuation still speaks immediately.
-    private let aggregationDelay: TimeInterval = 0.6
+    /// (0.3 s, not more: the streaming path already stabilizes text upstream
+    /// in SpeechGate, so most arrivals are sentence-final anyway.)
+    private let aggregationDelay: TimeInterval = 0.3
 
     /// Drop the oldest buffered text past this size (~30 s of speech) —
     /// beyond that the voice can never catch back up to the conversation.
     private let bufferCap = 240
+
+    /// One utterance speaks at most this much (cut at the next sentence
+    /// boundary past it). Chunking keeps the pump loop turning: the rate is
+    /// re-evaluated and newly arrived text merges in at every boundary,
+    /// instead of one giant utterance pinning the voice minutes behind.
+    private let chunkTarget = 120
 
     private let synthesizer = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var connectedFormat: AVAudioFormat?
 
+    /// Resolved voice, kept across utterances — speechVoices() is too slow
+    /// to consult per pump. Invalidated when the tag/identifier changes.
+    private var cachedVoice: AVSpeechSynthesisVoice?
+
     private var buffer = ""
     private var speaking = false
+    /// When the oldest unspoken text arrived (buffer was empty), for the
+    /// queue-wait diagnostic; nil while nothing waits.
+    private var oldestEnqueueAt: Date?
+    /// Set by pump(), cleared by the first rendered PCM buffer — measures
+    /// synthesis start latency (premium voices load a model on first use).
+    private var utteranceStartedAt: Date?
     /// Invalidates in-flight render callbacks after a session reset.
     private var generation = 0
     /// Pending un-duck, cancelled when the next utterance starts within the
@@ -102,6 +134,7 @@ final class SpeechOutput {
         guard enabled else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if buffer.isEmpty { oldestEnqueueAt = Date() }
         buffer += buffer.isEmpty ? trimmed : " " + trimmed
         if buffer.count > bufferCap {
             SpeechService.diag("speech backlog \(buffer.count) chars — dropping oldest")
@@ -147,11 +180,24 @@ final class SpeechOutput {
         generation &+= 1
         buffer = ""
         speaking = false
+        oldestEnqueueAt = nil
+        utteranceStartedAt = nil
+        cachedVoice = nil
         pendingPump?.cancel()
         pendingPump = nil
         player.stop()
         cancelUnduck()
         SystemAudio.unduckOutput()
+    }
+
+    /// Renders a token utterance and discards it, so a premium voice's model
+    /// load (hundreds of ms to seconds on first synthesis) is paid at session
+    /// start instead of delaying the first real translation.
+    func prewarm() {
+        guard enabled else { return }
+        let utterance = AVSpeechUtterance(string: " ")
+        utterance.voice = resolveVoice()
+        synthesizer.write(utterance) { _ in }
     }
 
     /// Session end: let the voice finish what it is saying, but nothing new.
@@ -161,15 +207,25 @@ final class SpeechOutput {
 
     // MARK: - Pipeline
 
-    /// Speaks the whole accumulated buffer as one utterance. Buffers arriving
-    /// while the voice is busy simply wait for the next pump — that is what
-    /// merges shards into continuous speech.
+    /// Speaks the next chunk of the accumulated buffer as one utterance.
+    /// Text arriving while the voice is busy simply waits for the next pump —
+    /// that is what merges shards into continuous speech.
     private func pump() {
         guard !speaking, !buffer.isEmpty else { return }
         speaking = true
-        let text = buffer
-        buffer = ""
+        let text = takeChunk()
         let gen = generation
+
+        // Queue-wait: how long the oldest text sat behind the previous
+        // utterance. The rate ramp answers backlog with faster speech.
+        let waitMs = oldestEnqueueAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+        oldestEnqueueAt = buffer.isEmpty ? nil : Date()
+        let backlog = text.count + buffer.count
+        let ramp = min(1.0, max(0.0, Double(backlog - rateRampStart) / Double(rateRampEnd - rateRampStart)))
+        let multiplier = baseRateMultiplier + (maxRateMultiplier - baseRateMultiplier) * ramp
+        utteranceStartedAt = Date()
+        SpeechService.diag(String(format: "tts pump chars=%d backlog=%d rate=%.2f wait=%dms",
+                                  text.count, buffer.count, multiplier, waitMs))
 
         if duckOthers {
             cancelUnduck()
@@ -177,8 +233,8 @@ final class SpeechOutput {
         }
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = rate
-        utterance.voice = AVSpeechSynthesisVoice(language: languageTag)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(multiplier)
+        utterance.voice = resolveVoice()
 
         var sawEnd = false
         synthesizer.write(utterance) { [weak self] rendered in
@@ -201,8 +257,76 @@ final class SpeechOutput {
         }
     }
 
+    /// Takes the next utterance's worth of text off the buffer: everything up
+    /// to the first sentence boundary past `chunkTarget`, or the whole buffer
+    /// when it is short (or has no boundary — never stall waiting for one).
+    private func takeChunk() -> String {
+        if buffer.count <= chunkTarget {
+            defer { buffer = "" }
+            return buffer
+        }
+        let terminators: Set<Character> = [".", "。", "．", "?", "？", "!", "！", "…", "\n"]
+        var idx = buffer.index(buffer.startIndex, offsetBy: chunkTarget)
+        while idx < buffer.endIndex, !terminators.contains(buffer[idx]) {
+            idx = buffer.index(after: idx)
+        }
+        guard idx < buffer.endIndex else {
+            defer { buffer = "" }
+            return buffer
+        }
+        idx = buffer.index(after: idx)
+        let chunk = String(buffer[..<idx])
+        buffer = String(buffer[idx...]).trimmingCharacters(in: .whitespaces)
+        return chunk
+    }
+
+    /// The voice for the current tag/identifier, resolved once and cached.
+    /// Auto mode prefers the highest-quality installed voice — the plain
+    /// `AVSpeechSynthesisVoice(language:)` default is the robotic compact
+    /// voice even when the user has premium voices downloaded.
+    private func resolveVoice() -> AVSpeechSynthesisVoice? {
+        if let cachedVoice { return cachedVoice }
+        var voice: AVSpeechSynthesisVoice?
+        if !voiceIdentifier.isEmpty {
+            voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier)
+            // A voice saved for another target language must not win —
+            // Korean read by an English voice is worse than the compact one.
+            if let v = voice, v.language.prefix(2) != languageTag.prefix(2) {
+                voice = nil
+            }
+        }
+        if voice == nil {
+            voice = Self.bestVoice(forLanguage: languageTag)
+        }
+        if voice == nil {
+            voice = AVSpeechSynthesisVoice(language: languageTag)
+        }
+        cachedVoice = voice
+        SpeechService.diag("tts voice=\(voice?.identifier ?? "system-default") quality=\(voice.map { "\($0.quality.rawValue)" } ?? "-")")
+        return voice
+    }
+
+    /// Highest-quality installed voice for a BCP 47 tag (premium > enhanced),
+    /// exact tag match winning ties. Returns nil when only default-quality
+    /// voices exist — the caller falls back to the system default then, which
+    /// avoids picking one of the novelty voices at random.
+    static func bestVoice(forLanguage tag: String) -> AVSpeechSynthesisVoice? {
+        let lang = tag.prefix(2)
+        return AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.prefix(2) == lang && $0.quality != .default }
+            .max { a, b in
+                if a.quality != b.quality { return a.quality.rawValue < b.quality.rawValue }
+                return (a.language == tag ? 1 : 0) < (b.language == tag ? 1 : 0)
+            }
+    }
+
     private func schedule(_ pcm: AVAudioPCMBuffer, gen: Int) {
         guard gen == generation else { return }
+        if let started = utteranceStartedAt {
+            utteranceStartedAt = nil
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            if ms > 250 { SpeechService.diag("tts render-start=\(ms)ms") }
+        }
         if connectedFormat != pcm.format {
             engine.connect(player, to: engine.mainMixerNode, format: pcm.format)
             connectedFormat = pcm.format

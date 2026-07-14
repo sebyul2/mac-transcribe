@@ -275,6 +275,21 @@ final class Settings {
         set { defaults.set(newValue, forKey: "duckWhileSpeaking") }
     }
 
+    /// TTS voice for spoken translations; empty means automatic — the
+    /// highest-quality installed voice for the target language.
+    var speechVoiceIdentifier: String {
+        get { defaults.string(forKey: "speechVoiceIdentifier") ?? "" }
+        set { defaults.set(newValue, forKey: "speechVoiceIdentifier") }
+    }
+
+    /// Speak stable tentative text before DeepL concludes it. Cuts several
+    /// seconds off the voice's lag behind the captions; the rare early
+    /// misread is corrected only on screen, never re-spoken. Default on.
+    var earlySpeechEnabled: Bool {
+        get { defaults.object(forKey: "earlySpeech") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "earlySpeech") }
+    }
+
     var deeplConfigured: Bool {
         !deeplAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
     }

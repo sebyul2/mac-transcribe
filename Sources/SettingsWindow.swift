@@ -42,6 +42,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let subtitleCheck = NSButton(checkboxWithTitle: "Show subtitle overlay at the bottom of the screen", target: nil, action: nil)
     private let speakCheck = NSButton(checkboxWithTitle: "Read translations aloud (TTS)", target: nil, action: nil)
     private let duckCheck = NSButton(checkboxWithTitle: "Duck other audio while speaking", target: nil, action: nil)
+    private let voicePopup = NSPopUpButton()
+    private let earlySpeakCheck = NSButton(checkboxWithTitle: "Speak ahead of confirmation (lowest delay)", target: nil, action: nil)
     private let transStatusLabel = NSTextField(labelWithString: "")
 
     // Meeting
@@ -233,11 +235,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         duckCheck.action = #selector(duckChanged)
         place(duckCheck, x: 40, top: 250, w: 420, h: 20, in: view)
 
+        _ = label("Voice:", top: 278, in: view)
+        voicePopup.target = self
+        voicePopup.action = #selector(voiceChanged)
+        place(voicePopup, x: fieldX, top: 276, w: fieldW, in: view)
+        let voiceNote = NSTextField(labelWithString:
+            "고품질 보이스는 시스템 설정 ▸ 손쉬운 사용 ▸ 콘텐츠 말하기에서 다운로드할 수 있습니다.")
+        voiceNote.font = .systemFont(ofSize: 11); voiceNote.textColor = .secondaryLabelColor
+        place(voiceNote, x: 40, top: 304, w: 420, h: 16, in: view)
+
+        earlySpeakCheck.target = self
+        earlySpeakCheck.action = #selector(earlySpeakChanged)
+        place(earlySpeakCheck, x: 40, top: 326, w: 420, h: 20, in: view)
+        let earlyNote = NSTextField(labelWithString:
+            "확정 전의 안정된 문장을 먼저 읽어 지연을 줄입니다. 드물게 화면 자막과 어긋날 수 있습니다.")
+        earlyNote.font = .systemFont(ofSize: 11); earlyNote.textColor = .secondaryLabelColor
+        place(earlyNote, x: 60, top: 348, w: 400, h: 16, in: view)
+
         transStatusLabel.alignment = .left
         transStatusLabel.maximumNumberOfLines = 2
         transStatusLabel.lineBreakMode = .byWordWrapping
         transStatusLabel.textColor = .secondaryLabelColor
-        place(transStatusLabel, x: 20, top: 284, w: 440, h: 34, in: view)
+        place(transStatusLabel, x: 20, top: 374, w: 440, h: 34, in: view)
     }
 
     // MARK: - Meeting tab
@@ -407,6 +426,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         subtitleCheck.state = s.subtitleOverlayEnabled ? .on : .off
         speakCheck.state = s.speakTranslations ? .on : .off
         duckCheck.state = s.duckWhileSpeaking ? .on : .off
+        earlySpeakCheck.state = s.earlySpeechEnabled ? .on : .off
+        // Voice popup filled by rebuildTranslationLanguages() below.
 
         micRadio.state = s.lockedAudioSourceIsSystem ? .off : .on
         systemRadio.state = s.lockedAudioSourceIsSystem ? .on : .off
@@ -538,6 +559,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let s = Settings.shared
         let value = represented(targetLangPopup)
         if s.deeplEnabled { s.deeplTargetLang = value } else { s.interpreterTargetLanguage = value }
+        rebuildVoicePopup()
         onSettingsChanged?()
     }
 
@@ -557,6 +579,60 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc private func duckChanged() {
         Settings.shared.duckWhileSpeaking = duckCheck.state == .on
         onSettingsChanged?()
+    }
+    @objc private func earlySpeakChanged() {
+        Settings.shared.earlySpeechEnabled = earlySpeakCheck.state == .on
+        onSettingsChanged?()
+    }
+
+    /// The spoken-output voice tag for the active provider's target language.
+    private func currentVoiceTag() -> String {
+        let s = Settings.shared
+        return SpeechOutput.languageTag(
+            deepl: s.deeplEnabled ? s.deeplTargetLang : "",
+            llm: s.interpreterTargetLanguage)
+    }
+
+    /// Fills the voice popup with the target language's installed voices,
+    /// best quality first; "Automatic" (the default) picks the highest
+    /// quality at session start.
+    private func rebuildVoicePopup() {
+        let s = Settings.shared
+        let tag = currentVoiceTag()
+        voicePopup.removeAllItems()
+        voicePopup.addItem(withTitle: "Automatic (best installed)")
+        voicePopup.lastItem?.representedObject = ""
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.prefix(2) == tag.prefix(2) }
+            .sorted {
+                if $0.quality != $1.quality { return $0.quality.rawValue > $1.quality.rawValue }
+                return $0.name < $1.name
+            }
+        for voice in voices {
+            let suffix = voice.quality == .premium ? " (Premium)"
+                : voice.quality == .enhanced ? " (Enhanced)" : ""
+            voicePopup.addItem(withTitle: voice.name + suffix)
+            voicePopup.lastItem?.representedObject = voice.identifier
+        }
+        selectByRepresented(voicePopup, s.speechVoiceIdentifier)
+    }
+
+    /// Persists the choice and speaks a short preview so it is judged by ear.
+    @objc private func voiceChanged() {
+        let s = Settings.shared
+        s.speechVoiceIdentifier = represented(voicePopup)
+        onSettingsChanged?()
+        let tag = currentVoiceTag()
+        let phrase = tag.hasPrefix("ko") ? "통역 음성은 이렇게 들립니다."
+            : tag.hasPrefix("ja") ? "通訳の音声はこのように聞こえます。"
+            : "The interpreter voice sounds like this."
+        let utterance = AVSpeechUtterance(string: phrase)
+        let id = s.speechVoiceIdentifier
+        utterance.voice = id.isEmpty
+            ? (SpeechOutput.bestVoice(forLanguage: tag) ?? AVSpeechSynthesisVoice(language: tag))
+            : AVSpeechSynthesisVoice(identifier: id)
+        testSynthesizer.stopSpeaking(at: .immediate)
+        testSynthesizer.speak(utterance)
     }
 
     // MARK: - DeepL key (plain until verified, fully masked after)
@@ -653,6 +729,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             selectByRepresented(sourceLangPopup, s.interpreterSourceLanguage)
             selectByRepresented(targetLangPopup, s.interpreterTargetLanguage)
         }
+        // The voice list follows the target language.
+        rebuildVoicePopup()
     }
 
     // MARK: - Meeting actions
